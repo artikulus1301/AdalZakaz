@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+httpx==0.28.1
+openai==1.58.1
+python-dotenv==1.0.1
+segno==1.6.1
+tzdata==2024.2
+pytest==8.3.4

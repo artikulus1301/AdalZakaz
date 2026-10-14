@@ -1,0 +1,649 @@
+// Панель продавца AdalZakaz. Ванильный JS, без сборки.
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const money = (n) => (n ?? 0).toLocaleString("ru-RU") + " тг";
+const dt = (iso) => (iso ? new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
+const d = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "—");
+let META = null;
+
+async function api(path, opts = {}) {
+  const o = { ...opts, headers: { ...(opts.headers || {}) } };
+  if (o.json !== undefined) { o.body = JSON.stringify(o.json); o.headers["Content-Type"] = "application/json"; delete o.json; }
+  const r = await fetch(path, o);
+  if (r.status === 401) { location.href = "/login"; throw new Error("Нужен вход"); }
+  const ct = r.headers.get("content-type") || "";
+  const data = ct.includes("json") ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((data && data.error) || data.detail?.[0]?.msg || `Ошибка ${r.status}`);
+  return data;
+}
+
+function toast(msg, err = false) {
+  const t = document.createElement("div");
+  t.className = "toast" + (err ? " err" : "");
+  t.textContent = msg;
+  document.body.append(t);
+  setTimeout(() => t.remove(), err ? 6000 : 3000);
+}
+
+// Обёртка для кнопок: блокирует кнопку, показывает спиннер, ловит ошибку
+async function act(btn, fn) {
+  const html = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spin"></span> ${html}`; }
+  try { return await fn(); } catch (e) { toast(e.message, true); } finally { if (btn) { btn.disabled = false; btn.innerHTML = html; } }
+}
+
+const EVENT_LABELS = {
+  order_created: "Заказ создан, остаток зарезервирован", payment_confirmed: "Оплата подтверждена из источника",
+  status_paid: "Статус: оплачен", status_assembled: "Статус: собран", status_shipped: "Передан в доставку (списан со склада)",
+  status_delivered: "Выдан покупателю", status_closed: "Заказ закрыт", status_cancelled: "Заказ отменён (резерв снят)",
+  evidence_added: "Добавлено доказательство", address_confirmed: "Адрес и окно доставки подтверждены",
+  clarification_recorded: "Зафиксирован ответ покупателя на уточнение", claim_received: "Претензия принята — запущен счётчик",
+  claim_type_confirmed: "Тип претензии подтверждён человеком", claim_decided: "Решение по претензии (человек)",
+  refund_registered: "Возврат денег зарегистрирован", returned_to_stock: "Товар возвращён на склад",
+  claim_closed: "Претензия закрыта", ai_draft_sent: "Черновик ИИ отправлен (после проверки)",
+  ai_draft_approved: "Черновик ИИ утверждён", ai_draft_rejected: "Черновик ИИ отклонён",
+};
+const TASK_LABELS = {
+  card_draft: "Карточка kk/ru", card_check: "Проверка карточки", clarify: "Уточнение до отправки",
+  reply_draft: "Ответ покупателю", claim_intake: "Приём претензии", claim_response: "Письменный ответ на претензию",
+  reasons_analysis: "Разбор причин",
+};
+
+// ---------------- навигация ----------------
+const VIEWS = { dash: viewDash, orders: viewOrders, products: viewProducts, claims: viewClaims, analytics: viewAnalytics, rules: viewRules };
+function go(view) {
+  location.hash = view;
+  $$("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  $("#view").innerHTML = `<div class="empty"><span class="spin"></span></div>`;
+  VIEWS[view]().catch((e) => ($("#view").innerHTML = `<div class="note bad">${esc(e.message)}</div>`));
+}
+$("#nav").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) go(b.dataset.view); });
+
+async function boot() {
+  META = await api("/api/meta");
+  $("#seller-name").textContent = META.seller_name || "Паспорт товара · журнал заказа · претензии";
+  renderAiStatus();
+  refreshClaimCount();
+  go(VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : "dash");
+}
+function renderAiStatus() {
+  const a = META.ai;
+  $("#ai-status").innerHTML = `ИИ: ${a.available ? `<span class="chip ai">${esc(a.provider)}</span>` : `<span class="chip warn">демо без ключа</span>`}
+    · режим <b>${a.mode === "shadow" ? "теневой" : "черновики"}</b><br>Kaspi: ${META.kaspi_mode === "api" ? "API" : "демо"}<br>`;
+}
+async function refreshClaimCount() {
+  const cl = await api("/api/claims?status=active");
+  const el = $("#claims-count");
+  el.hidden = !cl.length; el.textContent = cl.length;
+}
+
+// ---------------- drawer ----------------
+function openDrawer(html) {
+  $("#drawer-root").innerHTML = `<div class="drawer-back"></div><div class="drawer"><button class="btn small drawer-close">✕ Закрыть</button>${html}</div>`;
+  $(".drawer-back").onclick = closeDrawer; $(".drawer-close").onclick = closeDrawer;
+  return $(".drawer");
+}
+function closeDrawer() { $("#drawer-root").innerHTML = ""; }
+document.addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
+
+// ---------------- общие компоненты ----------------
+function chipStatus(s, label) {
+  const cls = { delivered: "ok", closed: "ok", paid: "ok", cancelled: "bad", new: "warn" }[s] || "";
+  return `<span class="chip ${cls}">${esc(label || s)}</span>`;
+}
+function timerChip(t, status) {
+  if (status !== "open") return `<span class="chip ok">отвечено${t.answered_on_time === false ? " с опозданием" : ""}</span>`;
+  if (t.overdue) return `<span class="chip bad timer">просрочено на ${-t.days_left} дн.</span>`;
+  return `<span class="chip ${t.urgent ? "bad" : "warn"} timer">${t.days_left} дн. до ${d(t.deadline)}</span>`;
+}
+function evidenceThumb(e) {
+  const src = `/files/${encodeURIComponent(e.filename)}`;
+  let media = `<a href="${src}" target="_blank">файл</a>`;
+  if (e.mime?.startsWith("image/")) media = `<a href="${src}" target="_blank"><img src="${src}" alt=""></a>`;
+  else if (e.mime?.startsWith("video/")) media = `<video src="${src}" controls preload="metadata"></video>`;
+  else if (e.mime?.startsWith("audio/")) media = `<audio src="${src}" controls></audio>`;
+  return `<div class="ev">${media}<div><b>${esc(e.kind_label)}</b> · ${dt(e.created_at)}</div>
+    <div class="muted" title="${esc(e.sha256)}">SHA-256 ${esc((e.sha256 || "").slice(0, 12))}…</div>${e.note ? `<div>${esc(e.note)}</div>` : ""}</div>`;
+}
+
+function micButton(targetSel) {
+  const id = "mic" + Math.random().toString(36).slice(2, 8);
+  setTimeout(() => {
+    const b = document.getElementById(id); if (!b) return;
+    let rec = null;
+    b.onclick = async () => {
+      if (!rec) {
+        try { rec = await VoiceRecorder.start(); b.classList.add("rec"); b.textContent = "■ Стоп"; }
+        catch (e) { toast(e.message, true); }
+        return;
+      }
+      b.classList.remove("rec"); b.innerHTML = `<span class="spin"></span> Распознаю…`;
+      const blob = await rec.stop(); rec = null;
+      const fd = new FormData(); fd.append("file", blob, "voice.wav");
+      try {
+        const r = await api("/api/ai/transcribe", { method: "POST", body: fd });
+        if (r.text) { const t = $(targetSel); t.value = (t.value ? t.value + " " : "") + r.text; }
+        else toast(r.note || "Речь не распознана", true);
+      } catch (e) { toast(e.message, true); }
+      b.textContent = "🎤 Голос";
+    };
+  });
+  return `<button type="button" class="btn small mic" id="${id}" title="Надиктовать (ru/kk)">🎤 Голос</button>`;
+}
+
+function renderDraft(dr, opts = {}) {
+  const src = dr.output?._source || dr.source;
+  const srcLabel = src === "llm" ? `модель ${esc(dr.model)}` : src === "fallback" ? "модель недоступна → эвристика" : "демо-эвристика";
+  const guard = (dr.guard || []).map((g) => `<div class="note ${g.severity === "block" ? "bad" : "warn"}">⚠ ${esc(g.message)}</div>`).join("");
+  const open = ["draft", "shadow"].includes(dr.status);
+  const text = dr.text_final ?? dr.text_original ?? dr.text ?? "";
+  const extra = [];
+  const o = dr.output || {};
+  if (o.missing?.length) extra.push(`<div class="note warn">Нет фактов: ${o.missing.map(esc).join(", ")}</div>`);
+  if (o.notes?.length) extra.push(`<div class="muted">${o.notes.map(esc).join("<br>")}</div>`);
+  if (o.used_fields?.length) extra.push(`<div class="muted">Опирается на поля: ${o.used_fields.map(esc).join(", ")}</div>`);
+  if (o.needs_human?.length) extra.push(`<div class="note warn">Нужен человек: ${o.needs_human.map(esc).join("; ")}</div>`);
+  if (o.photo_findings?.length) extra.push(`<div class="muted">По фото: ${o.photo_findings.map(esc).join("; ")}</div>`);
+  const shadow = dr.mode === "shadow" || META.ai.mode === "shadow";
+  const canSend = opts.sendable && !shadow;
+  return `<div class="draft" data-draft="${dr.id ?? dr.draft_id}">
+    <div class="draft-head"><span>🤖 Черновик ИИ · ${esc(TASK_LABELS[dr.task] || dr.task)} · ${srcLabel}</span>
+      <span>${open ? (shadow ? `<span class="chip warn">теневой режим — не отправляется</span>` : `<span class="chip ai">ждёт проверки</span>`) : `<span class="chip">${esc(dr.status)}</span>`}</span></div>
+    ${guard}${extra.join("")}
+    ${text ? `<textarea rows="4" ${open ? "" : "readonly"}>${esc(text)}</textarea>` : ""}
+    ${open ? `<div class="row" style="margin-top:6px">
+      ${canSend ? `<button class="btn small primary" data-dact="send">Отправить покупателю</button>` : ""}
+      ${opts.fill ? `<button class="btn small primary" data-dact="fill">Подставить в форму</button>` : ""}
+      <button class="btn small" data-dact="approve">${shadow ? "Оценить: верно / исправлено" : "Утвердить"}</button>
+      <button class="btn small danger" data-dact="reject">Отклонить</button></div>` : ""}
+  </div>`;
+}
+function bindDrafts(root, onDone, onFill) {
+  $$("[data-draft]", root).forEach((box) => {
+    $$("[data-dact]", box).forEach((b) => (b.onclick = () => act(b, async () => {
+      const id = box.dataset.draft, action = b.dataset.dact, ta = $("textarea", box);
+      if (action === "fill") { onFill && onFill(id); return; }
+      const r = await api(`/api/drafts/${id}/review`, { method: "POST", json: { action, text: ta ? ta.value : null } });
+      toast(action === "send" ? "Отправлено и записано в журнал" : `Черновик: ${r.status}${r.edited ? " (с правками)" : ""}`);
+      if (action === "send" && ta) navigator.clipboard?.writeText(ta.value).catch(() => {});
+      onDone && onDone();
+    })));
+  });
+}
+
+// ---------------- Сводка ----------------
+async function viewDash() {
+  const [m, cl, inbox] = await Promise.all([api("/api/metrics"), api("/api/claims?status=active"), api("/api/inbox")]);
+  const rejected = inbox.filter((i) => i.status.startsWith("rejected")).slice(0, 5);
+  $("#view").innerHTML = `
+    <div class="topbar"><h1>Сводка</h1>
+      <div class="row"><button class="btn" id="kaspi">↻ Забрать заказы Kaspi</button><button class="btn primary" id="new-order">+ Заказ</button></div></div>
+    ${metricTiles(m)}
+    <div class="grid g2">
+      <div class="card"><h2>Претензии в работе</h2>
+        ${cl.length ? `<table><tr><th>№</th><th>Заказ</th><th>Тип (ИИ / человек)</th><th>Срок ответа</th></tr>
+        ${cl.map((c) => `<tr class="click" data-claim="${c.id}"><td>${esc(c.number)}</td><td>${esc(c.order_number)}</td>
+          <td>${c.type ? esc(c.type_label) : `<span class="chip ai">${esc(c.ai_type_label)}</span>`}</td><td>${timerChip(c.timer, c.status)}</td></tr>`).join("")}</table>`
+        : `<div class="empty">Открытых претензий нет</div>`}
+      </div>
+      <div class="card"><h2>Не принятые заказы</h2>
+        <p class="muted">Заказ без свободного остатка не принимается — так один товар не продаётся дважды.</p>
+        ${rejected.length ? rejected.map((r) => `<div class="note warn">${esc(r.source)} · ${dt(r.created_at)}<br>${esc(r.error)}</div>`).join("") : `<div class="empty">Нет</div>`}
+      </div>
+    </div>`;
+  $$("[data-claim]").forEach((r) => (r.onclick = () => openClaim(r.dataset.claim)));
+  $("#kaspi").onclick = (e) => act(e.currentTarget, kaspiSync);
+  $("#new-order").onclick = newOrderForm;
+}
+async function kaspiSync() {
+  const r = await api("/api/connectors/kaspi/sync", { method: "POST" });
+  if (r.error) return toast(r.error, true);
+  const done = r.results.filter((x) => x.status === "done").length;
+  toast(`Kaspi (${r.mode === "api" ? "API" : "демо"}): принято ${done}, отклонено ${r.results.length - done}`);
+  go(location.hash.slice(1) || "dash");
+}
+function metricTiles(m) {
+  const t = (v, k, warn) => `<div class="tile"><div class="v" ${warn ? 'style="color:var(--bad)"' : ""}>${v ?? "—"}</div><div class="k">${k}</div></div>`;
+  const p = (v) => (v == null ? "—" : v + "%");
+  return `<div class="tiles">
+    ${t(m.orders_total, "заказов")}
+    ${t(p(m.no_stock_rate), `отмен из-за отсутствия товара (${m.no_stock_cancellations})`)}
+    ${t(p(m.otif_approx), "OTIF (прибл.): вовремя и в полном объёме")}
+    ${t(m.first_response_p90_min == null ? "—" : m.first_response_p90_min + " мин", "P90 первого ответа")}
+    ${t(p(m.not_as_described_rate), "претензий «не соответствует описанию» от выданных")}
+    ${t(p(m.claims_on_time_rate), "претензий отвечено в срок 10 дней")}
+    ${t(m.claims_overdue_open, "просроченных претензий", m.claims_overdue_open > 0)}
+    ${t(m.claim_resolution_avg_days == null ? "—" : m.claim_resolution_avg_days + " дн.", "средний срок решения")}
+    ${t(p(m.ai_drafts_edited_rate), `черновиков ИИ исправлено человеком (из ${m.ai_drafts_reviewed})`)}
+    ${t(money(m.revenue), "выручка (без отмен)")}
+    ${t(money(m.refunds), "возвращено денег")}
+  </div>`;
+}
+
+// ---------------- Заказы ----------------
+async function viewOrders() {
+  const st = sessionStorage.getItem("f_status") || "", ch = sessionStorage.getItem("f_channel") || "";
+  const list = await api(`/api/orders?${new URLSearchParams({ ...(st && { status: st }), ...(ch && { channel: ch }) })}`);
+  const opt = (obj, cur) => `<option value="">все</option>` + Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(v)}</option>`).join("");
+  $("#view").innerHTML = `
+    <div class="topbar"><h1>Заказы</h1>
+      <div class="row"><select id="f-status" style="width:auto">${opt(META.statuses, st)}</select>
+      <select id="f-channel" style="width:auto">${opt(META.channels, ch)}</select>
+      <button class="btn" id="kaspi">↻ Kaspi</button><button class="btn primary" id="new-order">+ Заказ</button></div></div>
+    <div class="card" style="padding:4px 8px">${list.length ? `<table>
+      <tr><th>№</th><th>Канал</th><th class="hide-sm">Создан</th><th>Статус</th><th>Оплата</th><th class="num">Сумма</th><th></th></tr>
+      ${list.map((o) => `<tr class="click" data-order="${o.id}"><td><b>${esc(o.number)}</b></td><td>${esc(o.channel_label)}</td>
+        <td class="hide-sm">${dt(o.created_at)}</td><td>${chipStatus(o.status, o.status_label)}</td>
+        <td>${o.payment_status === "paid" ? `<span class="chip ok">оплачен</span>` : `<span class="chip">нет</span>`}</td>
+        <td class="num">${money(o.total)}</td><td>${o.open_claims ? `<span class="chip bad">претензия</span>` : ""}</td></tr>`).join("")}
+    </table>` : `<div class="empty">Заказов нет</div>`}</div>`;
+  $("#f-status").onchange = (e) => { sessionStorage.setItem("f_status", e.target.value); go("orders"); };
+  $("#f-channel").onchange = (e) => { sessionStorage.setItem("f_channel", e.target.value); go("orders"); };
+  $$("[data-order]").forEach((r) => (r.onclick = () => openOrder(r.dataset.order)));
+  $("#kaspi").onclick = (e) => act(e.currentTarget, kaspiSync);
+  $("#new-order").onclick = newOrderForm;
+}
+
+async function newOrderForm() {
+  const products = await api("/api/products");
+  const channels = Object.entries(META.channels).filter(([k]) => k !== "kaspi");
+  const prodOpts = products.map((p) => `<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.passport.data.title_ru)} (свободно ${p.free})</option>`).join("");
+  const dr = openDrawer(`<h1>Новый заказ</h1>
+    <p class="muted">Для OLX, Instagram, WhatsApp, Telegram. Заказы Kaspi приходят только через API. Заказ проходит через ту же очередь и резерв, что и Kaspi.</p>
+    <form id="of" class="card">
+      <div class="grid g2">
+        <div class="field"><label>Канал</label><select name="channel">${channels.map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div>
+        <div class="field"><label>Язык покупателя</label><select name="lang"><option value="ru">русский</option><option value="kk">қазақша</option></select></div>
+        <div class="field"><label>Имя</label><input name="name" required></div>
+        <div class="field"><label>Телефон</label><input name="phone" placeholder="+7 7xx xxx xx xx"></div>
+        <div class="field"><label>Адрес</label><input name="address"></div>
+        <div class="field"><label>Зона доставки</label><select name="zone"><option>Тараз</option><option>Жамбылский район</option><option>Байзакский район</option><option>Таласский район</option><option>Другой район области</option></select></div>
+      </div>
+      <h3>Товары</h3><div id="items"></div>
+      <button type="button" class="btn small" id="add-item">+ товар</button><hr>
+      <button class="btn primary">Принять заказ</button>
+    </form>`);
+  const addItem = () => $("#items", dr).insertAdjacentHTML("beforeend", `<div class="grid g3 item" style="grid-template-columns:3fr 1fr 1fr">
+      <div class="field"><select name="sku">${prodOpts}</select></div>
+      <div class="field"><input name="qty" type="number" min="1" value="1"></div>
+      <div class="field"><input name="variant" placeholder="вариант (M, 42…)"></div></div>`);
+  addItem();
+  $("#add-item", dr).onclick = addItem;
+  const key = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+  $("#of", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
+    const f = new FormData(e.target);
+    const items = $$(".item", dr).map((row) => ({ sku: $("[name=sku]", row).value, qty: +$("[name=qty]", row).value, variant: $("[name=variant]", row).value }));
+    const r = await api("/api/orders", { method: "POST", headers: { "Idempotency-Key": key }, json: {
+      channel: f.get("channel"), delivery_zone: f.get("zone"), items,
+      buyer: { name: f.get("name"), phone: f.get("phone"), address: f.get("address"), lang: f.get("lang") } } });
+    toast("Заказ принят, остаток зарезервирован"); openOrder(r.order_id);
+  }); };
+}
+
+const FLOW = ["new", "paid", "assembled", "shipped", "delivered", "closed"];
+async function openOrder(id) {
+  const o = await api(`/api/orders/${id}`);
+  const idx = FLOW.indexOf(o.status);
+  const hasPack = o.evidence.some((e) => ["packing_video", "packing_photo"].includes(e.kind));
+  const statusBtns = o.next_statuses.filter((s) => s !== "cancelled" && s !== "paid")
+    .map((s) => `<button class="btn primary small" data-status="${s}">→ ${esc(META.statuses[s])}</button>`).join("");
+  const dr = openDrawer(`
+    <div class="row between"><h1>${esc(o.number)} · ${esc(o.channel_label)}</h1>
+      <div class="row">${chipStatus(o.status, o.status_label)} ${o.payment_status === "paid" ? `<span class="chip ok">оплата: ${esc(META.payment_sources[o.payment_source] || o.payment_source)}</span>` : `<span class="chip warn">не оплачен</span>`}</div></div>
+    <div class="steps">${o.status === "cancelled" ? `<span class="step">Отменён: ${esc(o.cancel_reason)}</span>` :
+      FLOW.map((s, i) => `<span class="step ${i < idx ? "done" : i === idx ? "now" : ""}">${esc(META.statuses[s])}</span>`).join("")}</div>
+    <div class="grid g2">
+      <div class="card"><h2>Состав заказа</h2>
+        ${o.items.map((it) => `<div style="margin-bottom:8px"><b>${esc(it.title_ru)}</b> × ${it.qty} — ${money(it.price)}
+          ${it.variant ? `<span class="chip">${esc(it.variant)}</span>` : ""}<br>
+          <small>${esc(it.sku)} · продан по паспорту v${it.passport_version}${it.passport_outdated ? ` <span class="chip warn">паспорт обновлён после продажи</span>` : ""}</small></div>`).join("")}
+        <div class="row between"><span class="muted">Итого</span><b>${money(o.total)}</b></div>
+        <hr><div class="muted">Покупатель: ${esc(o.buyer_name || "—")} · ${esc(o.buyer_phone || "")} · язык ${o.buyer_lang}</div>
+        <div class="muted">Адрес: ${esc(o.buyer_address || "—")} ${o.address_confirmed ? `<span class="chip ok">подтверждён ${esc(o.delivery_window || "")}</span>` : ""}</div>
+        ${o.clarification ? `<div class="note ok">Уточнение: ${esc(o.clarification)}</div>` : ""}
+      </div>
+      <div class="card"><h2>Следующий шаг</h2>
+        ${o.status === "new" && o.payment_status !== "paid" ? `
+          <form id="pay"><p class="muted">Оплата подтверждается только из платёжного источника. <b>Скриншот от покупателя не принимается.</b></p>
+          <div class="field"><label>Источник</label><select name="source">${Object.entries(META.payment_sources).filter(([k]) => o.channel === "kaspi" || k !== "kaspi_api").map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div>
+          <div class="grid g2"><div class="field"><label>№ операции</label><input name="ref" required></div>
+          <div class="field"><label>Сумма</label><input name="amount" type="number" value="${o.total}"></div></div>
+          <button class="btn primary">Подтвердить оплату</button></form>` : ""}
+        ${o.status === "paid" && !hasPack ? `<div class="note warn">Перед сборкой снимите видео упаковки: что положили, состояние, комплект.</div>` : ""}
+        ${["paid", "assembled"].includes(o.status) && o.channel !== "kaspi" && !o.address_confirmed ? `
+          <form id="addr"><h3>Подтвердить адрес до отправки</h3>
+          <div class="field"><input name="address" value="${esc(o.buyer_address || "")}" placeholder="Адрес"></div>
+          <div class="grid g2"><div class="field"><select name="zone">${["Тараз", "Жамбылский район", "Байзакский район", "Таласский район", "Другой район области"].map((z) => `<option ${z === o.delivery_zone ? "selected" : ""}>${z}</option>`).join("")}</select></div>
+          <div class="field"><input name="window" placeholder="Окно: завтра 10:00–14:00" required></div></div>
+          <button class="btn small">Адрес подтверждён покупателем</button></form>` : ""}
+        <div class="row" style="margin-top:10px">${statusBtns}
+          ${o.next_statuses.includes("cancelled") ? `<select id="cancel-reason" style="width:auto"><option value="buyer_request">по просьбе покупателя</option><option value="no_stock">нет товара</option><option value="no_payment">нет оплаты</option><option value="other">другое</option></select><button class="btn small danger" id="cancel">Отменить</button>` : ""}</div>
+        ${o.buyer_url ? `<hr><h3>Страница заказа для покупателя (kk/ru)</h3>
+          <div class="row"><div class="qr">${await api(`/api/orders/${o.id}/qr.svg`)}</div>
+          <div><a href="${esc(o.buyer_url)}" target="_blank">${esc(o.buyer_url)}</a><br><button class="btn small" id="copy-link">Скопировать ссылку</button>
+          <p class="muted">Что куплено, условия возврата простым языком и кнопка претензии. Отправьте ссылку в чат с покупателем.</p></div></div>`
+          : `<hr><p class="muted">Заказ Kaspi: покупателя на внешние страницы не уводим, возврат — через процесс Kaspi.</p>`}
+      </div>
+    </div>
+
+    <div class="card"><h2>Доказательства</h2>
+      <div class="thumbs">${o.evidence.map(evidenceThumb).join("") || `<span class="muted">Пока нет</span>`}</div>
+      <form id="ev" class="row" style="margin-top:10px">
+        <select name="kind" style="width:auto">${["packing_video", "packing_photo", "condition_photo", "return_video", "chat", "other"].map((k) => `<option value="${k}">${esc(META.evidence_kinds[k])}</option>`).join("")}</select>
+        <input type="file" name="file" accept="video/*,image/*,audio/*" capture="environment" required style="width:auto">
+        <input name="note" placeholder="заметка" style="width:180px"><button class="btn small">Загрузить</button></form>
+      <small class="muted">Файл хранится под SHA-256 — видно, что его не подменили. Покупатель уведомлён о фиксации упаковки.</small>
+    </div>
+
+    <div class="grid g2">
+      <div class="card"><h2>Уточнение до отправки</h2>
+        <p class="muted">ИИ предложит вопрос, если карточка допускает разные варианты. Ответ фиксирует программа.</p>
+        <button class="btn ai" id="ai-clarify">🤖 Предложить вопрос</button>
+        <div id="clarify-box"></div>
+        <form id="clar" style="margin-top:8px"><div class="field"><input name="question" placeholder="Вопрос"></div>
+        <div class="field"><input name="answer" placeholder="Ответ покупателя (например: размер M, 42)"></div><button class="btn small">Зафиксировать ответ</button></form>
+      </div>
+      <div class="card"><h2>Переписка</h2>
+        <div class="chat">${o.messages.map((m) => `<div class="msg ${m.direction}">${esc(m.text)}<small class="muted">${dt(m.created_at)}${m.ai_draft_id ? " · из черновика ИИ" : ""}</small></div>`).join("") || `<span class="muted">Сообщений нет</span>`}</div>
+        <form id="inmsg" style="margin-top:8px"><div class="field"><textarea id="in-text" name="text" rows="2" placeholder="Вставьте сообщение покупателя (ru / kk / смешанное)"></textarea></div>
+        <div class="row"><button class="btn ai">🤖 Черновик ответа</button>${micButton("#in-text")}<button type="button" class="btn small" id="own-reply">Ответить самому</button></div></form>
+      </div>
+    </div>
+
+    <div class="card"><h2>Черновики ИИ по заказу</h2>
+      ${o.drafts.filter((x) => x.task !== "claim_intake" && x.task !== "claim_response").map((x) => renderDraft(x, { sendable: true })).join("") || `<span class="muted">Нет</span>`}</div>
+
+    <div class="card"><h2>Претензии</h2>
+      ${o.claims.map((c) => `<div class="row between" style="margin-bottom:6px"><a href="#" data-claim="${c.id}">${esc(c.number)}</a> ${timerChip(c.timer, c.status)}</div>`).join("") || `<span class="muted">Нет</span>`}
+      ${["shipped", "delivered", "closed"].includes(o.status) ? `<form id="claimf" style="margin-top:8px"><p class="muted">Претензия по телефону, в кабинете Kaspi или в чате — зарегистрируйте её здесь, чтобы запустить счётчик 10 дней.</p>
+        <div class="field"><textarea id="claim-text" name="text" rows="2" placeholder="Текст претензии"></textarea></div>
+        <div class="row"><select name="lang" style="width:auto"><option value="ru">ru</option><option value="kk">kk</option></select>${micButton("#claim-text")}<button class="btn small">Зарегистрировать претензию</button></div></form>` : ""}
+    </div>
+
+    <div class="card"><h2>Журнал заказа</h2><ul class="timeline">
+      ${o.events.map((e) => `<li>${dt(e.created_at)} — ${esc(EVENT_LABELS[e.type] || e.type)} <small class="muted">· ${esc(e.actor)}${e.payload?.kind ? " · " + esc(META.evidence_kinds[e.payload.kind]) : ""}${e.payload?.ref ? " · " + esc(e.payload.ref) : ""}${e.payload?.decision ? " · " + esc(META.decisions[e.payload.decision]) : ""}</small></li>`).join("")}
+    </ul></div>`);
+
+  const reload = () => openOrder(id);
+  const post = (url, json) => api(url, { method: "POST", json });
+  $("#pay", dr) && ($("#pay", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
+    act(e.submitter, async () => { await post(`/api/orders/${id}/payment`, { source: f.get("source"), ref: f.get("ref"), amount: +f.get("amount") }); toast("Оплата подтверждена"); reload(); }); });
+  $("#addr", dr) && ($("#addr", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
+    act(e.submitter, async () => { await post(`/api/orders/${id}/address`, Object.fromEntries(f)); reload(); }); });
+  $$("[data-status]", dr).forEach((b) => (b.onclick = () => act(b, async () => { await post(`/api/orders/${id}/status`, { status: b.dataset.status }); toast("Статус обновлён"); reload(); })));
+  $("#cancel", dr) && ($("#cancel", dr).onclick = (e) => confirm("Отменить заказ и снять резерв?") && act(e.currentTarget, async () => {
+    await post(`/api/orders/${id}/status`, { status: "cancelled", reason: $("#cancel-reason", dr).value }); reload(); }));
+  $("#copy-link", dr) && ($("#copy-link", dr).onclick = () => { navigator.clipboard.writeText(o.buyer_url); toast("Ссылка скопирована"); });
+  $("#ev", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/orders/${id}/evidence`, { method: "POST", body: new FormData(e.target) }); toast("Доказательство сохранено"); reload(); }); };
+  $("#ai-clarify", dr).onclick = (e) => act(e.currentTarget, async () => {
+    const r = await post(`/api/orders/${id}/ai/clarify`);
+    if (!r.output.needed) { $("#clarify-box", dr).innerHTML = `<div class="note ok">Уточнение не требуется — вариант однозначен.</div>`; return; }
+    await reload();
+    $("#clar [name=question]").value = r.text;
+    $("#clar").scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  $("#clar", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); act(e.submitter, async () => { await post(`/api/orders/${id}/clarification`, Object.fromEntries(f)); reload(); }); };
+  $("#inmsg", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await post(`/api/orders/${id}/ai/reply`, { text: $("#in-text", dr).value }); reload(); }); };
+  $("#own-reply", dr).onclick = (e) => { const t = prompt("Ваш ответ покупателю:"); t && act(e.currentTarget, async () => { await post(`/api/orders/${id}/messages`, { text: t }); reload(); }); };
+  $("#claimf", dr) && ($("#claimf", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
+    act(e.submitter, async () => { const r = await post("/api/claims", { order_id: +id, text: f.get("text"), lang: f.get("lang") }); refreshClaimCount(); openClaim(r.id); }); });
+  $$("[data-claim]", dr).forEach((a) => (a.onclick = (e) => { e.preventDefault(); openClaim(a.dataset.claim); }));
+  bindDrafts(dr, reload);
+}
+
+// ---------------- Товары ----------------
+async function viewProducts() {
+  const list = await api("/api/products");
+  $("#view").innerHTML = `
+    <div class="topbar"><h1>Товары и паспорта</h1><button class="btn primary" id="new-p">+ Товар</button></div>
+    <div class="card" style="padding:4px 8px"><table>
+      <tr><th>Артикул</th><th>Товар</th><th class="hide-sm">Категория</th><th class="num">Остаток</th><th class="num">Резерв</th><th class="num">Свободно</th><th>Паспорт</th></tr>
+      ${list.map((p) => { const ch = p.passport.check_result || {}; const miss = (ch.missing || []).length, ai = (ch.ai_issues || []).length;
+        return `<tr class="click" data-p="${p.id}"><td>${esc(p.sku)}</td><td>${esc(p.passport.data.title_ru)}</td><td class="hide-sm">${esc(p.category_label)}</td>
+        <td class="num">${p.stock}</td><td class="num">${p.reserved}</td><td class="num" ${p.free <= 0 ? 'style="color:var(--bad)"' : ""}>${p.free}</td>
+        <td>v${p.current_version} ${miss ? `<span class="chip bad">нет ${miss} полей</span>` : `<span class="chip ok">поля есть</span>`} ${ai ? `<span class="chip warn">${ai} замеч.</span>` : ""}</td></tr>`; }).join("")}
+    </table></div>`;
+  $$("[data-p]").forEach((r) => (r.onclick = () => openProduct(r.dataset.p)));
+  $("#new-p").onclick = () => openProduct(null);
+}
+
+const FIELD_ORDER = ["title_ru", "title_kk", "brand", "model", "country", "composition", "dimensions", "weight", "color", "size_grid", "variants", "package_contents", "warranty_months", "price", "desc_ru", "desc_kk", "supplier_text"];
+async function openProduct(id) {
+  const p = id ? await api(`/api/products/${id}`) : null;
+  const data = p ? p.passport.data : {};
+  const req = new Set(p ? p.required : []);
+  const missing = new Set((p?.passport.check_result?.missing || []).map((m) => m.field));
+  const area = (k) => ["desc_ru", "desc_kk", "supplier_text", "size_grid", "package_contents"].includes(k);
+  const fields = FIELD_ORDER.map((k) => `<div class="field ${missing.has(k) ? "missing" : ""}" ${area(k) ? 'style="grid-column:1/-1"' : ""}>
+      <label>${esc(META.fields[k])} ${req.has(k) ? `<span class="req">*</span>` : ""}</label>
+      ${area(k) ? `<textarea name="${k}" rows="${k.startsWith("desc") ? 4 : 2}">${esc(data[k] ?? "")}</textarea>` : `<input name="${k}" value="${esc(data[k] ?? "")}">`}</div>`).join("");
+  const ch = p?.passport.check_result || {};
+  const dr = openDrawer(`
+    <h1>${p ? esc(data.title_ru) : "Новый товар"}</h1>
+    ${p ? `<div class="row"><span class="chip">${esc(p.sku)}</span><span class="chip">${esc(p.category_label)}</span><span class="chip">паспорт v${p.current_version}</span>
+      <span class="chip ${p.free > 0 ? "ok" : "bad"}">свободно ${p.free} из ${p.stock} (резерв ${p.reserved})</span></div>` : ""}
+    <div class="grid g2" style="margin-top:12px;grid-template-columns:3fr 2fr">
+      <form id="pf" class="card">
+        ${p ? "" : `<div class="grid g3"><div class="field"><label>Артикул <span class="req">*</span></label><input name="sku" required></div>
+          <div class="field"><label>Категория</label><select name="category">${Object.entries(META.categories).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div>
+          <div class="field"><label>Остаток</label><input name="stock" type="number" value="0"></div></div>`}
+        <div class="grid g2">${fields}</div>
+        <div class="field"><label>Комментарий к версии</label><input name="note" placeholder="что изменилось"></div>
+        <button class="btn primary">${p ? "Сохранить новую версию паспорта" : "Создать паспорт"}</button>
+        <p class="muted">Версия неизменна после сохранения: заказ хранит ту версию, по которой товар продан.</p>
+      </form>
+      <div>${p ? `
+        <div class="card"><h2>Проверка карточки</h2>
+          ${(ch.missing || []).length ? `<div class="note bad">Не заполнено: ${ch.missing.map((m) => esc(m.label)).join(", ")}</div>` : `<div class="note ok">Обязательные поля заполнены</div>`}
+          ${(ch.warnings || []).map((w) => `<div class="note warn">${esc(w)}</div>`).join("")}
+          ${(ch.ai_issues || []).map((w) => `<div class="note ai">🤖 ${esc(w.problem_ru)} <small>(${esc(w.field)})</small></div>`).join("")}
+          ${ch.photo ? (ch.photo.observations || []).concat((ch.photo.conflicts || []).map((c) => `Фото: ${c.photo_shows} ≠ паспорт: ${c.passport_says} (${c.field})`)).map((w) => `<div class="note ai">📷 ${esc(w)}</div>`).join("") : ""}
+          <div class="row"><button class="btn ai" id="ai-check">🤖 Проверить (ИИ + фото)</button><button class="btn ai" id="ai-draft">🤖 Черновик описания kk/ru</button></div>
+          <div id="draft-box">${p.drafts.filter((x) => x.task === "card_draft" && ["draft", "shadow"].includes(x.status)).slice(0, 1).map((x) => renderDraft(x, { fill: true })).join("")}</div>
+        </div>
+        <div class="card"><h2>Фото реального товара</h2>
+          <div class="thumbs">${(data.photos || []).map((f) => `<img src="/files/${encodeURIComponent(f)}" alt="">`).join("") || `<span class="muted">Нет фото</span>`}</div>
+          <form id="ph" class="row" style="margin-top:8px"><input type="file" name="file" accept="image/*" capture="environment" required style="width:auto"><button class="btn small">Добавить</button></form>
+          <small class="muted">ИИ (модель со зрением) сверит фото с полями паспорта: цвет, комплект, маркировку.</small></div>
+        <div class="card"><h2>Остаток</h2><form id="st" class="row"><input name="stock" type="number" value="${p.stock}" style="width:120px"><button class="btn small">Сохранить</button></form>
+          <small class="muted">Один остаток на все каналы.</small></div>
+        <div class="card"><h2>Страница-паспорт для OLX и соцсетей</h2>
+          <div class="row"><div class="qr">${await api(`/api/products/${p.id}/qr.svg`)}</div><div><a href="${esc(p.public_url)}" target="_blank">${esc(p.public_url)}</a>
+          <p class="muted">Ссылку и QR — в объявление OLX или в профиль Instagram.</p></div></div></div>
+        <div class="card"><h2>Версии</h2>${p.versions.map((v) => `<div><a href="#" data-v="${v.version}">v${v.version}</a> · ${dt(v.created_at)} · ${esc(v.note || "")} <small class="muted">${esc(v.author || "")}</small></div>`).join("")}<div id="diff"></div></div>
+      ` : ""}</div>
+    </div>`);
+
+  $("#pf", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
+    const f = Object.fromEntries(new FormData(e.target));
+    const pdata = Object.fromEntries(FIELD_ORDER.map((k) => [k, f[k]]));
+    if (p) { await api(`/api/products/${p.id}/passport`, { method: "PUT", json: { data: pdata, note: f.note || "Правка продавца" } }); toast("Сохранена новая версия паспорта"); openProduct(p.id); }
+    else { const np = await api("/api/products", { method: "POST", json: { sku: f.sku, category: f.category, stock: +f.stock, data: pdata } }); toast("Паспорт создан"); openProduct(np.id); }
+  }); };
+  if (!p) return;
+  const reload = () => openProduct(p.id);
+  $("#ai-check", dr).onclick = (e) => act(e.currentTarget, async () => { await api(`/api/products/${p.id}/ai/check`, { method: "POST" }); reload(); });
+  $("#ai-draft", dr).onclick = (e) => act(e.currentTarget, async () => { await api(`/api/products/${p.id}/ai/draft`, { method: "POST" }); reload(); });
+  $("#ph", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/products/${p.id}/photos`, { method: "POST", body: new FormData(e.target) }); toast("Фото добавлено — новая версия паспорта"); reload(); }); };
+  $("#st", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/products/${p.id}/stock`, { method: "POST", json: { stock: +new FormData(e.target).get("stock") } }); toast("Остаток сохранён"); reload(); }); };
+  $$("[data-v]", dr).forEach((a) => (a.onclick = async (e) => { e.preventDefault();
+    const v = await api(`/api/products/${p.id}/versions/${a.dataset.v}`);
+    $("#diff", dr).innerHTML = `<hr><b>Изменения в v${v.version}</b>` + (v.diff.length ? v.diff.map((x) => `<div><small>${esc(x.label)}</small><br><span class="diff-old">${esc(x.old ?? "")}</span><br><span class="diff-new">${esc(x.new ?? "")}</span></div>`).join("") : `<div class="muted">Только фото</div>`); }));
+  bindDrafts(dr, reload, (draftId) => {
+    const dd = p.drafts.find((x) => String(x.id) === String(draftId)); const o = dd.output;
+    if (o.desc_ru) $("[name=desc_ru]", dr).value = o.desc_ru;
+    if (o.desc_kk) $("[name=desc_kk]", dr).value = o.desc_kk;
+    if (o.title_kk && !$("[name=title_kk]", dr).value) $("[name=title_kk]", dr).value = o.title_kk;
+    $("[name=note]", dr).value = "Описание kk/ru из черновика ИИ, сверено продавцом";
+    api(`/api/drafts/${draftId}/review`, { method: "POST", json: { action: "approve" } }).catch(() => {});
+    toast("Подставлено. Сверьте с реальным товаром и сохраните версию.");
+  });
+}
+
+// ---------------- Претензии ----------------
+async function viewClaims() {
+  const list = await api("/api/claims");
+  $("#view").innerHTML = `<div class="topbar"><h1>Претензии</h1><span class="muted">одна очередь · срок ответа 10 календарных дней · решает человек</span></div>
+    <div class="card" style="padding:4px 8px">${list.length ? `<table><tr><th>№</th><th>Заказ</th><th class="hide-sm">Получена</th><th>Тип</th><th>Статус</th><th>Срок</th></tr>
+    ${list.map((c) => `<tr class="click" data-claim="${c.id}"><td><b>${esc(c.number)}</b></td><td>${esc(c.order_number)} <small class="muted">${esc(META.channels[c.channel])}</small></td>
+      <td class="hide-sm">${dt(c.received_at)}</td><td>${c.type ? esc(c.type_label) : `<span class="chip ai" title="предложение ИИ">🤖 ${esc(c.ai_type_label)}</span>`}</td>
+      <td>${{ open: "в работе", decided: "решение принято", closed: "закрыта" }[c.status]}</td><td>${timerChip(c.timer, c.status)}</td></tr>`).join("")}</table>` : `<div class="empty">Претензий нет</div>`}</div>`;
+  $$("[data-claim]").forEach((r) => (r.onclick = () => openClaim(r.dataset.claim)));
+}
+
+async function openClaim(id) {
+  const c = await api(`/api/claims/${id}`);
+  const ev = c.evaluation, o = c.order;
+  const claimEv = c.evidence.filter((e) => e.claim_id === c.id);
+  const packEv = c.evidence.filter((e) => ["packing_video", "packing_photo"].includes(e.kind));
+  const intake = c.drafts.find((x) => x.task === "claim_intake");
+  const responses = c.drafts.filter((x) => x.task === "claim_response");
+  const decisionOpts = [...ev.options, ...(ev.refusal_allowed ? ["refusal"] : [])];
+  const dr = openDrawer(`
+    <div class="row between"><h1>Претензия ${esc(c.number)}</h1>${timerChip(c.timer, c.status)}</div>
+    <p class="muted">Заказ <a href="#" id="to-order">${esc(o.number)}</a> · ${esc(o.channel_label)} · ${o.items.map((i) => esc(i.title_ru) + " (паспорт v" + i.passport_version + ")").join(", ")} · ${money(o.total)}
+      · получена ${dt(c.received_at)} · ответить до <b>${d(c.deadline)}</b></p>
+    <div class="grid g2">
+      <div class="card"><h2>Что пишет покупатель</h2>
+        ${c.buyer_type ? `<div class="muted">Покупатель выбрал: ${esc(META.claim_types[c.buyer_type])}</div>` : ""}
+        <p style="white-space:pre-wrap">${esc(c.text || "")}</p>
+        ${c.voice_transcript ? `<div class="note ai">🎤 Расшифровка голоса: ${esc(c.voice_transcript)}</div>` : ""}
+        <div class="thumbs">${claimEv.map(evidenceThumb).join("")}</div>
+        <hr><h3>Доказательства продавца</h3>
+        <div class="thumbs">${packEv.map(evidenceThumb).join("") || `<div class="note warn">Видео/фото упаковки нет — в споре будет сложнее.</div>`}</div>
+      </div>
+      <div class="card"><h2>🤖 Разбор ИИ <small class="muted">(подсказка, не решение)</small></h2>
+        <div><b>Предложенный тип:</b> ${esc(c.ai_type_label)} · <b>причина:</b> ${esc(META.reason_tags[c.reason_tag] || c.reason_tag || "—")}</div>
+        ${c.summary ? `<p class="muted">${esc(c.summary)}</p>` : ""}
+        <button class="btn ai small" id="ai-intake">🤖 Разобрать заново</button>
+        ${intake ? renderDraft(intake, { sendable: o.channel !== "kaspi" }) : ""}
+      </div>
+    </div>
+
+    <div class="card"><h2>1. Подтвердите тип и состояние (человек)</h2>
+      ${c.status === "open" ? `<form id="cf" class="grid g3">
+        <div class="field"><label>Тип претензии</label><select name="type">${Object.entries(META.claim_types).map(([k, v]) => `<option value="${k}" ${(c.type || c.ai_type) === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+        <div class="field"><label>Состояние возвращаемого товара</label><select name="cond">
+          <option value="" ${c.condition_ok == null ? "selected" : ""}>не проверено</option>
+          <option value="1" ${c.condition_ok === 1 ? "selected" : ""}>товарный вид, ярлыки сохранены</option>
+          <option value="0" ${c.condition_ok === 0 ? "selected" : ""}>следы использования / нет ярлыков</option></select></div>
+        <div class="field"><label>Причина (для разбора)</label><select name="reason">${Object.entries(META.reason_tags).map(([k, v]) => `<option value="${k}" ${c.reason_tag === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+        <div><button class="btn primary small">Подтвердить</button></div></form>`
+        : `<div>Тип: <b>${esc(c.type_label)}</b></div>`}
+    </div>
+
+    <div class="card"><h2>2. Что допускают правила</h2>
+      ${ev.warnings.map((w) => `<div class="note warn">${esc(w)}</div>`).join("")}
+      ${ev.basis.map((b) => `<p>${esc(b)}</p>`).join("")}
+      ${ev.checks.map((b) => `<div class="note ok">✓ ${esc(b)}</div>`).join("")}
+      ${ev.claim_type ? `<div>Допустимые решения: ${ev.options.map((x) => `<span class="chip ok">${esc(META.decisions[x])}</span>`).join(" ") || "—"}
+        ${ev.refusal_allowed ? `<span class="chip warn">мотивированный отказ возможен</span><div class="note warn">Основание отказа: ${esc(ev.refusal_basis)}</div>` : `<span class="chip">отказ не предусмотрен</span>`}</div>` : ""}
+      <small class="muted">Дней с выдачи: ${ev.days_since_delivery ?? "—"}</small>
+    </div>
+
+    <div class="card"><h2>3. Решение (человек)</h2>
+      ${c.status === "open" ? (ev.claim_type ? `<form id="df">
+        <div class="grid g2"><div class="field"><label>Решение</label><select name="decision">${decisionOpts.map((x) => `<option value="${x}">${esc(META.decisions[x])}</option>`).join("")}</select></div>
+        <div class="field"><label>Сумма возврата (для возврата денег / уменьшения цены)</label><input name="amount" type="number" value="${o.total}"></div></div>
+        <div class="field"><label>Обоснование / что делаем (для отказа — мотивированно, со ссылкой на доказательства)</label><textarea name="text" id="dec-text" rows="3" required></textarea></div>
+        <div class="row"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" name="restock" style="width:auto"> вернуть товар на склад</label>${micButton("#dec-text")}
+        <button class="btn primary">Принять решение</button></div>
+        <small class="muted">Возврат денег регистрируется один раз: повтор команды не создаст второй возврат.</small></form>` : `<div class="muted">Сначала подтвердите тип.</div>`)
+      : `<div class="note ok"><b>${esc(c.decision_label)}</b> — ${esc(c.decision_text)}<br><small>Основание: ${esc(c.rule_basis)} · правила v${c.rules_version} · ${esc(c.decided_by)} · ${dt(c.decided_at)}</small>
+         ${c.refund ? `<br>Возврат зарегистрирован: ${money(c.refund.amount)}` : ""}</div>
+         <button class="btn ai" id="ai-resp">🤖 Черновик письменного ответа (${o.buyer_lang})</button>
+         ${responses.map((x) => renderDraft(x, { sendable: true })).join("")}
+         ${c.status === "decided" ? `<hr><button class="btn" id="close-claim">Закрыть претензию</button>` : ""}`}
+    </div>`);
+  const reload = () => { openClaim(id); refreshClaimCount(); };
+  const post = (url, json) => api(url, { method: "POST", json });
+  $("#to-order", dr).onclick = (e) => { e.preventDefault(); openOrder(o.id); };
+  $("#ai-intake", dr).onclick = (e) => act(e.currentTarget, async () => { await post(`/api/claims/${id}/ai/intake`); reload(); });
+  $("#cf", dr) && ($("#cf", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
+    act(e.submitter, async () => { await post(`/api/claims/${id}/confirm`, { type: f.get("type"), condition_ok: f.get("cond") === "" ? null : f.get("cond") === "1", reason_tag: f.get("reason") }); reload(); }); });
+  $("#df", dr) && ($("#df", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
+    if (f.get("decision") === "refund" && !confirm(`Зарегистрировать возврат ${money(+f.get("amount"))}?`)) return;
+    act(e.submitter, async () => { await post(`/api/claims/${id}/decide`, { decision: f.get("decision"), text: f.get("text"), refund_amount: +f.get("amount"), return_to_stock: !!f.get("restock") }); toast("Решение принято и записано в журнал"); reload(); }); });
+  $("#ai-resp", dr) && ($("#ai-resp", dr).onclick = (e) => act(e.currentTarget, async () => { await post(`/api/claims/${id}/ai/response`); reload(); }));
+  $("#close-claim", dr) && ($("#close-claim", dr).onclick = (e) => act(e.currentTarget, async () => { await post(`/api/claims/${id}/close`); reload(); }));
+  bindDrafts(dr, reload);
+}
+
+// ---------------- Аналитика ----------------
+async function viewAnalytics() {
+  const m = await api("/api/metrics");
+  const types = Object.entries(m.claims_by_type); const max = Math.max(1, ...types.map(([, v]) => v));
+  $("#view").innerHTML = `<div class="topbar"><h1>Аналитика пилота</h1></div>
+    ${metricTiles(m)}
+    <div class="grid g2">
+      <div class="card"><h2>Претензии по типам</h2>
+        ${types.map(([k, v]) => `<div style="margin:6px 0"><div class="row between"><span>${esc(META.claim_types[k] || "не определён")}</span><b>${v}</b></div><div class="bar" style="width:${(100 * v) / max}%"></div></div>`).join("") || `<div class="empty">Нет данных</div>`}
+        <p class="muted">Эффект «до/после» без сопоставимого периода — предварительный.</p></div>
+      <div class="card"><h2>Причина → правка паспорта</h2>
+        <p class="muted">ИИ группирует причины решённых претензий и предлагает правку поля. Продавец утверждает — создаётся новая версия паспорта, цикл возвращается к шагу 1.</p>
+        <button class="btn ai" id="reasons">🤖 Разобрать причины возвратов</button><div id="groups"></div></div>
+    </div>`;
+  $("#reasons").onclick = (e) => act(e.currentTarget, async () => {
+    const r = await api("/api/ai/reasons", { method: "POST" });
+    $("#groups").innerHTML = r.groups.length ? r.groups.map((g, i) => `<div class="draft"><div class="draft-head"><span>${esc(g.title)} · ${esc(g.reason)}</span><span>${g.count} шт. · ${g.claims.map(esc).join(", ")}</span></div>
+      <div>${esc(g.suggestion_ru)}</div>${g.examples.map((x) => `<div class="muted">«${esc(x)}»</div>`).join("")}
+      ${g.field ? `<form class="apply" data-i="${i}" style="margin-top:8px"><label>${esc(META.fields[g.field])} — сейчас: ${esc(g.current_value ?? "пусто")}</label>
+        <textarea name="value" rows="2">${esc(g.proposed_value ?? g.current_value ?? "")}</textarea><button class="btn small primary">Утвердить правку → новая версия паспорта</button></form>` : ""}</div>`).join("")
+      : `<div class="empty">Нет решённых претензий для разбора</div>`;
+    $$(".apply").forEach((f) => (f.onsubmit = (ev) => { ev.preventDefault(); const g = r.groups[f.dataset.i];
+      act(ev.submitter, async () => { const res = await api(`/api/products/${g.product_id}/apply`, { method: "POST", json: { field: g.field, value: new FormData(f).get("value") } }); toast(`Паспорт обновлён до v${res.version}`); }); }));
+  });
+}
+
+// ---------------- Правила и ИИ ----------------
+async function viewRules() {
+  const r = await api("/api/rules");
+  const x = r.data;
+  $("#view").innerHTML = `<div class="topbar"><h1>Правила возврата и режим ИИ</h1></div>
+    <div class="grid g2">
+      <div class="card"><h2>Правила v${r.version} ${r.approved ? `<span class="chip ok">утверждены: ${esc(r.approved_by)}</span>` : `<span class="chip bad">не утверждены юристом</span>`}</h2>
+        <p class="muted">Значения взяты из публикаций (finance.kz, inbusiness.kz). Перед запуском юрист сверяет их с текстом закона. ИИ эти правила не меняет и не обходит.</p>
+        <form id="rf">
+          <div class="grid g3">
+            <div class="field"><label>Возврат исправного товара, дней</label><input name="return_days_non_food" type="number" value="${x.return_days_non_food}"></div>
+            <div class="field"><label>Ответ на претензию, дней</label><input name="claim_response_days" type="number" value="${x.claim_response_days}"></div>
+            <div class="field"><label>Требования по недостаткам без гарантии, дней</label><input name="defect_claim_days_no_warranty" type="number" value="${x.defect_claim_days_no_warranty}"></div>
+          </div>
+          <div class="field"><label>Условия возврата (ru), по строке</label><textarea name="cru" rows="3">${esc(x.return_conditions_ru.join("\n"))}</textarea></div>
+          <div class="field"><label>Условия возврата (kk), по строке</label><textarea name="ckk" rows="3">${esc(x.return_conditions_kk.join("\n"))}</textarea></div>
+          <div class="field"><label>Исключения (ст. 30): категория = основание</label><textarea name="excl" rows="5">${esc(Object.entries(x.excluded_categories).map(([k, v]) => `${k} = ${v}`).join("\n"))}</textarea>
+            <small class="muted">Коды категорий: ${Object.keys(META.categories).join(", ")}</small></div>
+          <button class="btn">Сохранить как новую версию</button>
+        </form>
+        ${!r.approved ? `<hr><form id="af" class="row"><input name="lawyer" placeholder="ФИО юриста" style="width:240px" required><button class="btn primary">Утвердить v${r.version}</button></form>` : ""}
+        <hr><h3>История</h3>${r.history.map((h) => `<div>v${h.version} · ${dt(h.created_at)} · ${h.approved_by ? "утв. " + esc(h.approved_by) : "не утверждена"}</div>`).join("")}
+      </div>
+      <div>
+        <div class="card"><h2>Режим ИИ</h2>
+          <div class="choice">
+            <label><input type="radio" name="mode" value="shadow" ${META.ai.mode === "shadow" ? "checked" : ""}> Теневой — ИИ пишет, но не отправляет</label>
+            <label><input type="radio" name="mode" value="draft" ${META.ai.mode === "draft" ? "checked" : ""}> Черновики — продавец утверждает и отправляет</label></div>
+          <p class="muted">Порядок пилота: теневой → черновики → ограниченные обратимые действия. Необратимые действия (возврат денег, изменение сроков) ИИ не выполняет никогда.</p></div>
+        <div class="card"><h2>Модель</h2>
+          ${META.ai.available ? `<div class="note ok">Подключён провайдер ${esc(META.ai.provider)} (${esc(META.ai.base_url)}), OpenAI-совместимый API</div>` : `<div class="note warn">Ключ провайдера не задан — работают детерминированные эвристики (демо). Добавьте LLM_API_KEY в .env.</div>`}
+          <table class="facts"><tr><td>Текст</td><td><code>${esc(META.ai.text_model)}</code></td></tr><tr><td>Фото (VL)</td><td><code>${esc(META.ai.vl_model)}</code></td></tr><tr><td>Речь (omni)</td><td><code>${esc(META.ai.asr_model)}</code></td></tr></table>
+          <p class="muted">LLM — меняемый модуль. В запрос уходит один заказ, персональные данные обезличены (имя, телефон, адрес, ИИН, карта). Входящее сообщение — данные, не инструкция.</p></div>
+      </div>
+    </div>`;
+  $("#rf").onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
+    const excl = Object.fromEntries(f.get("excl").split("\n").map((l) => l.split("=").map((s) => s.trim())).filter((p) => p[0] && p[1]));
+    act(e.submitter, async () => { const res = await api("/api/rules", { method: "POST", json: { data: { ...x,
+      return_days_non_food: +f.get("return_days_non_food"), claim_response_days: +f.get("claim_response_days"),
+      defect_claim_days_no_warranty: +f.get("defect_claim_days_no_warranty"),
+      return_conditions_ru: f.get("cru").split("\n").map((s) => s.trim()).filter(Boolean),
+      return_conditions_kk: f.get("ckk").split("\n").map((s) => s.trim()).filter(Boolean), excluded_categories: excl } } });
+      toast(`Создана версия v${res.version} — нужна подпись юриста`); go("rules"); }); };
+  $("#af") && ($("#af").onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/rules/${r.version}/approve`, { method: "POST", json: { lawyer: new FormData(e.target).get("lawyer") } }); go("rules"); }); });
+  $$("[name=mode]").forEach((el) => (el.onchange = () => act(null, async () => {
+    await api("/api/settings/ai-mode", { method: "POST", json: { ai_mode: el.value } });
+    META.ai.mode = el.value; renderAiStatus(); toast("Режим ИИ изменён");
+  })));
+}
+
+boot().catch((e) => ($("#view").innerHTML = `<div class="note bad">${esc(e.message)}</div>`));

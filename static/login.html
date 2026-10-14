@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AdalZakaz — вход</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="public" style="max-width:380px;padding-top:12vh">
+  <div class="card">
+    <div class="logo" style="margin:0 0 4px">AdalZakaz</div>
+    <p class="muted" style="margin-top:0">Вход в панель продавца</p>
+    <form method="post" action="/login">
+      <div class="field"><label for="p">Пароль</label><input id="p" name="password" type="password" autofocus required></div>
+      <p class="note bad" id="err" hidden>Неверный пароль</p>
+      <button class="btn primary" type="submit">Войти</button>
+    </form>
+    <p class="muted" style="font-size:.8rem">Пароль задаётся в .env (ADAL_SELLER_PASSWORD). По умолчанию для демо: <code>demo</code>.</p>
+  </div>
+</div>
+<script>if (location.search.includes("error")) document.getElementById("err").hidden = false;</script>
+</body>
+</html>

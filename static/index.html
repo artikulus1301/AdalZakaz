@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AdalZakaz — панель продавца</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo">AdalZakaz</div>
+    <div class="logo-sub" id="seller-name">Паспорт товара · журнал заказа · претензии</div>
+    <nav class="nav" id="nav">
+      <button data-view="dash">Сводка</button>
+      <button data-view="orders">Заказы</button>
+      <button data-view="products">Товары и паспорта</button>
+      <button data-view="claims">Претензии <span class="count" id="claims-count" hidden></span></button>
+      <button data-view="analytics">Аналитика</button>
+      <button data-view="rules">Правила и ИИ</button>
+    </nav>
+    <div class="side-foot">
+      <div id="ai-status"></div>
+      <a href="/logout">Выйти</a>
+    </div>
+  </aside>
+  <main id="view"></main>
+</div>
+<div id="drawer-root"></div>
+<script src="/static/recorder.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

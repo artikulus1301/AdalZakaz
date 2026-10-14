@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Тапсырыс / Заказ — AdalZakaz</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="public">
+  <header><div><div class="logo" style="margin:0">AdalZakaz</div><small class="muted" id="seller"></small></div><div class="langs" id="langs"></div></header>
+  <div id="root"><div class="empty"><span class="spin"></span></div></div>
+</div>
+<script src="/static/recorder.js"></script>
+<script src="/static/buyer.js"></script>
+<script>
+const token = location.pathname.split("/").pop();
+let O = null, voiceBlob = null, rec = null, sentMsg = null;
+const clientId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+
+async function load() {
+  const r = await fetch(`/api/public/orders/${encodeURIComponent(token)}`);
+  if (!r.ok) { $("#root").innerHTML = `<div class="note bad">${t().notFound}</div>`; return; }
+  O = await r.json();
+  render();
+}
+
+function render() {
+  const L = t();
+  $("#seller").textContent = O.seller_name || "";
+  $("#root").innerHTML = `
+    <div class="card">
+      <div class="row between"><h1>${L.order} ${esc(O.number)}</h1><span class="chip">${esc(O.status_label)}</span></div>
+      <h2>${L.bought}</h2>
+      ${O.items.map((it) => `<div style="margin-bottom:12px">
+        <b>${esc(it.passport["title_" + LANG] || it.passport.title_ru)}</b> × ${it.qty} — ${money(it.price)}
+        ${it.variant ? `<span class="chip">${L.variant}: ${esc(it.variant)}</span>` : ""}
+        <div class="thumbs" style="margin:6px 0">${(it.passport.photos || []).map((u) => `<img src="${u}" alt="">`).join("")}</div>
+        <p style="margin:4px 0">${esc(it.passport["desc_" + LANG] || "")}</p>
+        ${factsTable(it.passport)}
+        <small class="muted">${L.version} v${it.passport_version}</small></div>`).join("")}
+      <div class="row between"><span class="muted">${L.total}</span><b>${money(O.total)}</b></div>
+    </div>
+
+    <div class="card">${returnsBlock(O.rules, O.items.every((i) => i.excluded))}</div>
+
+    ${O.claims.length ? `<div class="card"><h2>${L.claims}</h2>${O.claims.map((c) => `<div style="margin-bottom:10px">
+      <b>${L.claimNo} ${esc(c.number)}</b> — ${L.claimStatus[c.status]} · ${L.answerUntil} ${new Date(c.deadline).toLocaleDateString("ru-RU")}
+      ${c.response ? `<div class="note ok"><b>${L.response}:</b><br>${esc(c.response)}</div>` : ""}</div>`).join("")}</div>` : ""}
+
+    <div class="card"><h2>${L.newClaim}</h2>
+      ${O.can_claim ? `<form id="cf">
+        <label>${L.whatHappened}</label>
+        <div class="choice" style="margin-bottom:10px">${Object.entries(O.claim_types).map(([k, v]) => `<label><input type="radio" name="type" value="${k}"> ${esc(v[LANG])}</label>`).join("")}</div>
+        <div class="field"><label>${L.describe}</label><textarea name="text" rows="3" placeholder="${L.describePh}"></textarea></div>
+        <div class="field"><label>${L.photos}</label><input type="file" name="photos" accept="image/*,video/*" multiple></div>
+        <div class="field"><label>${L.voice}</label><div class="row"><button type="button" class="btn small mic" id="rec">${L.rec}</button><span id="voice-state"></span></div></div>
+        <button class="btn primary" id="send">${L.send}</button>
+        <div id="sent"></div>
+      </form>` : `<p class="muted">${L.notYet}</p>`}
+    </div>
+
+    <div class="card"><h2>${L.ask}</h2>
+      ${O.messages.length ? `<div class="chat">${O.messages.map((m) => `<div class="msg ${m.direction === "in" ? "out" : "in"}"><small class="muted">${m.direction === "in" ? L.you : L.seller}</small>${esc(m.text)}</div>`).join("")}</div>` : ""}
+      <form id="mf" class="row" style="margin-top:8px"><input name="text" placeholder="${L.askPh}" style="flex:1;min-width:200px" required><button class="btn">${L.askSend}</button></form>
+      ${sentMsg ? `<div class="note ok">${sentMsg}</div>` : ""}
+    </div>
+
+    <p class="note ai">🤖 ${esc(O.ai_notice[LANG])}</p>
+    <p class="muted" style="font-size:.85rem">📹 ${esc(O.evidence_notice[LANG])}</p>`;
+  bind();
+}
+
+function bind() {
+  const L = t();
+  const cf = $("#cf");
+  if (cf) {
+    $("#rec").onclick = async () => {
+      if (!rec) {
+        try { rec = await VoiceRecorder.start(); $("#rec").classList.add("rec"); $("#rec").textContent = L.stop; } catch (e) { alert(e.message); }
+        return;
+      }
+      voiceBlob = await rec.stop(); rec = null;
+      $("#rec").classList.remove("rec"); $("#rec").textContent = L.rec;
+      showVoice();
+    };
+    showVoice();
+    cf.onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(cf);
+      if (!fd.get("text").trim() && !voiceBlob) { alert(L.describe); return; }
+      fd.set("lang", LANG); fd.set("client_id", clientId);
+      if (voiceBlob) fd.set("voice", voiceBlob, voiceBlob.type === "audio/wav" ? "voice.wav" : "voice.webm");
+      const btn = $("#send"); btn.disabled = true; btn.innerHTML = `<span class="spin"></span> ${L.send}`;
+      try {
+        const r = await fetch(`/api/public/orders/${encodeURIComponent(token)}/claims`, { method: "POST", body: fd });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || "Error");
+        voiceBlob = null;
+        await load();
+        $("#sent") && ($("#sent").innerHTML = "");
+        alert(L.sent(data.number, new Date(data.deadline).toLocaleDateString("ru-RU")));
+      } catch (err) { alert(err.message); btn.disabled = false; btn.textContent = L.send; }
+    };
+  }
+  $("#mf").onsubmit = async (e) => {
+    e.preventDefault();
+    const text = new FormData(e.target).get("text");
+    const r = await fetch(`/api/public/orders/${encodeURIComponent(token)}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+    if (r.ok) { sentMsg = L.asked; await load(); } else alert((await r.json()).error);
+  };
+}
+
+function showVoice() {
+  const box = $("#voice-state"); if (!box) return;
+  if (!voiceBlob) { box.innerHTML = ""; return; }
+  box.innerHTML = `<audio controls src="${URL.createObjectURL(voiceBlob)}"></audio> <button type="button" class="btn small danger" id="vdel">${t().del}</button>`;
+  $("#vdel").onclick = () => { voiceBlob = null; showVoice(); };
+}
+
+fetch(`/api/public/orders/${encodeURIComponent(token)}`).then((r) => r.ok ? r.json() : null).then((o) => {
+  initLang(o?.lang, () => O && render());
+  load();
+});
+</script>
+</body>
+</html>
