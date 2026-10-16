@@ -196,6 +196,30 @@ CREATE TABLE IF NOT EXISTS rules (
     approved_at TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS copilot_messages (
+    id INTEGER PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    text TEXT NOT NULL,
+    meta TEXT,
+    plan_id INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS copilot_messages_chat ON copilot_messages(chat_id, id);
+
+CREATE TABLE IF NOT EXISTS copilot_plans (
+    id INTEGER PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    request TEXT NOT NULL,
+    steps TEXT NOT NULL,
+    status TEXT NOT NULL,
+    model TEXT,
+    created_at TEXT NOT NULL,
+    decided_by TEXT,
+    decided_at TEXT,
+    finished_at TEXT
+);
 """
 
 

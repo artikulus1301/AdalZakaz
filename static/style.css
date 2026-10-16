@@ -452,6 +452,98 @@ th:first-child { border-top-left-radius: 10px; } th:last-child { border-top-righ
 .intake-result h3 { margin: 0; }
 #intake-status:not(:empty) { padding: 12px 0; }
 
+/* ---------- Adal Copilot ---------- */
+/* страница занимает экран целиком: высота окна минус отступы main (28px сверху, 72px снизу) */
+.cp-view { display: flex; flex-direction: column; height: calc(100vh - 100px); min-height: 560px; }
+.cp-view .topbar { flex: none; margin-bottom: 16px; }
+.cp-wrap { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(0, 1fr); gap: 16px; }
+
+/* список диалогов */
+.cp-hist { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.cp-hist-box { flex: 1; min-height: 0; overflow-y: auto; }
+.cp-hist-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.cp-hist-item { width: 100%; min-height: var(--tap); display: grid; gap: 1px; text-align: left; font: inherit; color: var(--ink);
+  background: none; border: 0; border-radius: 10px; padding: 8px 12px; cursor: pointer; transition: background var(--dur); }
+.cp-hist-item:hover { background: var(--panel-2); }
+.cp-hist-item[aria-current] { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+.cp-hist-t { font-size: .875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cp-hist-item small { font-size: .75rem; color: var(--muted); font-weight: 400; }
+.cp-hist-empty { font-size: .875rem; color: var(--muted); padding: 8px 12px; margin: 0; }
+.cp-hist-open { display: none; }
+.drawer .cp-hist-box { margin-top: 12px; }
+
+/* чат */
+.cp { min-height: 0; display: flex; flex-direction: column; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.cp-log { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 18px; scroll-behavior: smooth; }
+.cp-msg { display: flex; gap: 10px; max-width: 860px; min-width: 0; animation: cp-in 200ms ease-out; }
+@keyframes cp-in { from { opacity: 0; transform: translateY(4px); } }
+.cp-msg.user { align-self: flex-end; max-width: min(640px, 85%); }
+.cp-msg.bot { align-self: flex-start; width: 100%; }
+.cp-avatar { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--ai-soft); color: var(--ai); }
+.cp-avatar.big { width: 56px; height: 56px; margin: 0 auto 14px; }
+.cp-body { min-width: 0; flex: 1; display: grid; gap: 8px; justify-items: start; }
+.cp-bubble { padding: 10px 14px; border-radius: 16px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .9375rem; max-width: 100%; line-height: 1.55; }
+.cp-msg.user .cp-bubble { background: var(--brand); color: var(--brand-ink); border-bottom-right-radius: 4px; }
+.cp-msg.user.pending .cp-bubble { opacity: .7; }
+.cp-msg.bot .cp-bubble { background: var(--panel-2); border: 1px solid var(--line); border-top-left-radius: 4px; }
+.cp-bubble b { font-weight: 650; }
+.cp-ref { font: inherit; font-weight: 600; color: var(--brand); background: none; border: 0; padding: 0; cursor: pointer;
+  text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--brand) 40%, transparent); text-underline-offset: 2px; }
+.cp-ref:hover { text-decoration-color: currentColor; }
+.cp-typing { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.cp-sources { display: flex; gap: 6px; flex-wrap: wrap; }
+button.cp-src { cursor: pointer; font: inherit; font-size: .8125rem; font-weight: 500; color: var(--ink); min-height: 32px; }
+button.cp-src:hover { border-color: var(--brand); color: var(--brand); }
+
+/* план (to-do) */
+.cp-plan { width: 100%; border: 1px solid var(--ai); border-radius: var(--radius); background: var(--panel); padding: 12px 16px; }
+.cp-plan-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--ai); margin-bottom: 4px; }
+.cp-todo { list-style: none; margin: 0; padding: 0; }
+.cp-step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+.cp-step:first-child { border-top: 0; }
+.cp-step small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.cp-step-t { overflow-wrap: anywhere; }
+.cp-mark { width: 20px; height: 20px; margin-top: 2px; border-radius: 50%; border: 2px solid var(--ai); }
+.cp-step.done .cp-mark, .cp-step.failed .cp-mark, .cp-step.blocked .cp-mark { border: 0; background: currentColor;
+  -webkit-mask: var(--ic) center / contain no-repeat; mask: var(--ic) center / contain no-repeat; }
+.cp-step.done .cp-mark { color: var(--ok); --ic: var(--ic-checkcircle); }
+.cp-step.failed .cp-mark { color: var(--bad); --ic: var(--ic-xcircle); }
+.cp-step.failed small { color: var(--bad); }
+.cp-step.blocked .cp-mark { color: var(--warn); --ic: var(--ic-alert); }
+.cp-step.blocked small { color: var(--warn); }
+.cp-step.blocked .cp-step-t, .cp-step.skipped .cp-step-t { color: var(--muted); text-decoration: line-through; }
+.cp-step.skipped .cp-mark { border: 2px dashed var(--line-strong); }
+.cp-plan-act { margin-top: 10px; }
+
+/* пустой диалог */
+.cp-welcome { margin: auto; max-width: 620px; text-align: center; padding: 12px 0; }
+.cp-welcome h2 { font-size: 1.375rem; margin-bottom: 18px; }
+.cp-suggest { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.cp-suggest .btn { border-radius: 99px; font-weight: 500; }
+
+.cp-form { display: flex; gap: 8px; align-items: flex-end; padding: 12px 16px; border-top: 1px solid var(--line); }
+.cp-form textarea { min-height: var(--tap); max-height: 160px; resize: none; padding-top: 10px; }
+
+@media (max-width: 860px) {
+  /* в нижнем меню 7 разделов: подпись обрезается, а не наезжает на соседнюю */
+  .nav button { overflow: hidden; }
+  .cp-view { height: auto; min-height: 0; }
+  .cp-view .topbar { flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; }
+  .cp-view .topbar h1 { white-space: nowrap; }
+  .cp-view .topbar .row { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+  .cp-view .topbar .chip { white-space: normal; }
+  .cp-wrap { grid-template-columns: minmax(0, 1fr); }
+  .cp-hist { display: none; }
+  .cp-hist-open { display: inline-flex; }
+  .cp-log { flex: none; height: calc(100dvh - 330px); min-height: 280px; padding: 14px; }
+  .cp-msg.user { max-width: 92%; }
+  .cp-send-l { display: none; }
+}
+@media (max-width: 420px) {
+  .nav button { font-size: .625rem; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }

@@ -26,8 +26,9 @@ FULL = {"title_ru": "Платье", "title_kk": "Көйлек", "desc_ru": "Пл
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    if os.path.exists(os.environ["ADAL_DB"]):
-        os.remove(os.environ["ADAL_DB"])
+    # Путь из конфигурации: другой тестовый модуль мог импортировать приложение раньше
+    if db.config.DB_PATH.exists():
+        db.config.DB_PATH.unlink()
     db.init()
     yield
 

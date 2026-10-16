@@ -36,10 +36,12 @@ class QwenLLM:
                                   default_headers={"x-api-key": config.QWEN_API_KEY})
         return self._client
 
-    def json(self, system: str, user: str, images: list[tuple[bytes, str]] | None = None) -> tuple[dict, str]:
-        """Запрос с ответом в JSON. images — список (байты, mime) для мультимодальной модели."""
+    def json(self, system: str, user: str, images: list[tuple[bytes, str]] | None = None,
+             model: str | None = None) -> tuple[dict, str]:
+        """Запрос с ответом в JSON. images — список (байты, mime) для мультимодальной модели.
+        model — переопределить модель (например, для Adal Copilot)."""
         from openai import BadRequestError
-        model = config.QWEN_VL_MODEL if images else config.QWEN_TEXT_MODEL
+        model = model or (config.QWEN_VL_MODEL if images else config.QWEN_TEXT_MODEL)
         if images:
             content = [{"type": "image_url", "image_url": {"url": _data_url(b, m)}} for b, m in images]
             content.append({"type": "text", "text": user})
