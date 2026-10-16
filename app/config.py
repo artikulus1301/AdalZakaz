@@ -30,6 +30,8 @@ QWEN_TEXT_MODEL = _env("LLM_TEXT_MODEL", "QWEN_TEXT_MODEL", default="qwen/qwen3.
 QWEN_VL_MODEL = _env("LLM_VISION_MODEL", "QWEN_VL_MODEL", default="qwen/qwen3-vl-plus:free")
 QWEN_ASR_MODEL = _env("LLM_SPEECH_MODEL", "QWEN_ASR_MODEL", default="qwen/qwen3.8-omni-flash:free")
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+ASR_PROVIDER = os.getenv("ASR_PROVIDER", "local").lower()
+ASR_LOCAL_MODEL = os.getenv("ASR_LOCAL_MODEL", "base")
 
 # --- Kaspi Магазин ---
 KASPI_TOKEN = os.getenv("KASPI_TOKEN", "")

@@ -72,7 +72,7 @@ async function act(btn, fn) {
 }
 
 const EVENT_LABELS = {
-  order_created: "Заказ создан, остаток зарезервирован", payment_confirmed: "Оплата подтверждена из источника",
+  order_created: "Заказ создан, остаток зарезервирован", order_intake_confirmed: "Продавец проверил заказ из сообщения / голоса", payment_confirmed: "Оплата подтверждена из источника",
   status_paid: "Статус: оплачен", status_assembled: "Статус: собран", status_shipped: "Передан в доставку (списан со склада)",
   status_delivered: "Выдан покупателю", status_closed: "Заказ закрыт", status_cancelled: "Заказ отменён (резерв снят)",
   evidence_added: "Добавлено доказательство", address_confirmed: "Адрес и окно доставки подтверждены",
@@ -120,8 +120,9 @@ async function refreshClaimCount() {
 }
 
 // ---------------- drawer ----------------
-let drawerOpener = null;
+let drawerOpener = null, drawerCleanup = null;
 function openDrawer(html) {
+  if (drawerCleanup) { drawerCleanup(); drawerCleanup = null; }
   const wasOpen = !!$(".drawer");
   const scroll = wasOpen ? $(".drawer").scrollTop : 0;
   if (!wasOpen) drawerOpener = document.activeElement;
@@ -136,6 +137,7 @@ function openDrawer(html) {
 }
 function closeDrawer() {
   if (!$(".drawer")) return;
+  if (drawerCleanup) { drawerCleanup(); drawerCleanup = null; }
   $("#drawer-root").innerHTML = ""; document.body.style.overflow = "";
   if (drawerOpener?.isConnected) drawerOpener.focus();
 }
@@ -240,7 +242,7 @@ async function viewDash() {
   const rejected = inbox.filter((i) => i.status.startsWith("rejected")).slice(0, 5);
   $("#view").innerHTML = `
     <div class="topbar"><div><h1>Сводка</h1><div class="sub">Что требует внимания сегодня</div></div>
-      <div class="row"><button class="btn" id="kaspi">${icon("refresh")} Забрать заказы Kaspi</button><button class="btn primary" id="new-order">${icon("plus")} Новый заказ</button></div></div>
+      <div class="row"><button class="btn" id="kaspi">${icon("refresh")} Забрать заказы Kaspi</button><button class="btn ai" id="message-order">Из сообщения / голоса</button><button class="btn primary" id="new-order">${icon("plus")} Новый заказ</button></div></div>
     ${m.claims_overdue_open > 0 ? `<div class="note bad"><div><b>Просрочено претензий: ${m.claims_overdue_open}.</b> Ответьте сегодня — срок ответа по закону 10 дней.</div></div>` : ""}
     <div class="grid g2">
       <div class="card"><div class="card-head"><h2>Претензии в работе</h2>${cl.length ? `<button class="btn ghost small" data-go="claims">Все ${icon("arrowRight", 16)}</button>` : ""}</div>
@@ -259,7 +261,8 @@ async function viewDash() {
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go, true)));
   $$("[data-claim]").forEach((r) => (r.onclick = () => openClaim(r.dataset.claim)));
   $("#kaspi").onclick = (e) => act(e.currentTarget, kaspiSync);
-  $("#new-order").onclick = newOrderForm;
+  $("#new-order").onclick = () => newOrderForm();
+  $("#message-order").onclick = openOrderIntake;
 }
 async function kaspiSync() {
   const r = await api("/api/connectors/kaspi/sync", { method: "POST" });
@@ -296,7 +299,7 @@ async function viewOrders() {
   const opt = (obj, cur) => `<option value="">все</option>` + Object.entries(obj).map(([k, v]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(v)}</option>`).join("");
   $("#view").innerHTML = `
     <div class="topbar"><div><h1>Заказы</h1><div class="sub">${list.length} ${st || ch ? "по фильтру" : "всего"}</div></div>
-      <div class="row"><button class="btn" id="kaspi">${icon("refresh")} Kaspi</button><button class="btn primary" id="new-order">${icon("plus")} Новый заказ</button></div></div>
+      <div class="row"><button class="btn" id="kaspi">${icon("refresh")} Kaspi</button><button class="btn ai" id="message-order">Из сообщения / голоса</button><button class="btn primary" id="new-order">${icon("plus")} Новый заказ</button></div></div>
     <div class="row" style="margin-bottom:12px">
       <label class="sr-only" for="f-status">Статус</label><select id="f-status" style="width:auto">${opt(META.statuses, st).replace(">все<", ">Все статусы<")}</select>
       <label class="sr-only" for="f-channel">Канал</label><select id="f-channel" style="width:auto">${opt(META.channels, ch).replace(">все<", ">Все каналы<")}</select>
@@ -310,20 +313,22 @@ async function viewOrders() {
     </table></div>` : (st || ch ? emptyState("По этому фильтру заказов нет", "Попробуйте сбросить фильтры.")
       : emptyState("Заказов пока нет", "Заберите заказы из Kaspi или создайте заказ из OLX, Instagram, WhatsApp.", `<button class="btn primary" id="empty-new">${icon("plus")} Новый заказ</button>`))}</div>`;
   $("#f-reset") && ($("#f-reset").onclick = () => { sessionStorage.removeItem("f_status"); sessionStorage.removeItem("f_channel"); go("orders"); });
-  $("#empty-new") && ($("#empty-new").onclick = newOrderForm);
+  $("#empty-new") && ($("#empty-new").onclick = () => newOrderForm());
   $("#f-status").onchange = (e) => { sessionStorage.setItem("f_status", e.target.value); go("orders"); };
   $("#f-channel").onchange = (e) => { sessionStorage.setItem("f_channel", e.target.value); go("orders"); };
   $$("[data-order]").forEach((r) => (r.onclick = () => openOrder(r.dataset.order)));
   $("#kaspi").onclick = (e) => act(e.currentTarget, kaspiSync);
-  $("#new-order").onclick = newOrderForm;
+  $("#new-order").onclick = () => newOrderForm();
+  $("#message-order").onclick = openOrderIntake;
 }
 
-async function newOrderForm() {
+async function newOrderForm(prefill = null) {
   const products = await api("/api/products");
   const channels = Object.entries(META.channels).filter(([k]) => k !== "kaspi");
   const prodOpts = `<option value="" selected disabled>Выберите товар</option>` + products.map((p) => `<option value="${esc(p.sku)}" ${p.free <= 0 ? "disabled" : ""}>${esc(p.sku)} — ${esc(p.passport.data.title_ru)} (свободно ${p.free})</option>`).join("");
-  const dr = openDrawer(`<h1>Новый заказ</h1>
-    <p class="muted">Для OLX, Instagram, WhatsApp, Telegram. Заказы Kaspi приходят только через API. Заказ проходит через ту же очередь и резерв, что и Kaspi.</p>
+  const dr = openDrawer(`<h1>${prefill ? "Проверьте черновик заказа" : "Новый заказ"}</h1>
+    <p class="muted">${prefill ? "Проверьте товар, размер и количество. Заполните имя покупателя. Цена и остатки будут проверены ещё раз при подтверждении." : "Для OLX, Instagram, WhatsApp, Telegram. Заказы Kaspi приходят только через API."}</p>
+    ${prefill ? `<details class="card"><summary>Исходное сообщение</summary><p class="intake-source">${esc(prefill.source_text)}</p></details>` : ""}
     <form id="of" class="card">
       <div class="grid g2">
         <div class="field"><label for="o-ch">Канал</label><select id="o-ch" name="channel">${channels.map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select></div>
@@ -331,15 +336,16 @@ async function newOrderForm() {
         <div class="field"><label for="o-name">Имя <span class="req" aria-hidden="true">*</span></label><input id="o-name" name="name" autocomplete="name" required></div>
         <div class="field"><label for="o-phone">Телефон</label><input id="o-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+7 7__ ___ __ __" pattern="[0-9+ ]{10,20}" title="Например: +7 701 123 45 67"></div>
         <div class="field"><label for="o-addr">Адрес</label><input id="o-addr" name="address" autocomplete="street-address"></div>
-        <div class="field"><label for="o-zone">Зона доставки</label><select id="o-zone" name="zone"><option>Тараз</option><option>Жамбылский район</option><option>Байзакский район</option><option>Таласский район</option><option>Другой район области</option></select></div>
+        <div class="field"><label for="o-zone">Зона доставки</label><select id="o-zone" name="zone"><option value="">Уточнить у покупателя</option><option>Тараз</option><option>Жамбылский район</option><option>Байзакский район</option><option>Таласский район</option><option>Другой район области</option><option>Самовывоз</option></select></div>
+        <div class="field"><label for="o-window">Желаемый день / время</label><input id="o-window" name="window" maxlength="200" placeholder="Например: завтра, 10:00–14:00"><small class="hint">Пожелание покупателя. Срок согласуется отдельно.</small></div>
       </div>
       <h3>Товары</h3>${products.length ? "" : `<div class="note warn"><div>Нет товаров. Сначала создайте паспорт товара в разделе «Товары».</div></div>`}<div id="items"></div>
       <button type="button" class="btn small" id="add-item">${icon("plus", 16)} Добавить товар</button><hr>
-      <div class="form-actions"><button class="btn primary" ${products.length ? "" : "disabled"}>Принять заказ</button><button type="button" class="btn ghost" id="o-cancel">Отмена</button></div>
+      <div class="form-actions"><button class="btn primary" ${products.length ? "" : "disabled"}>${prefill ? "Подтвердить заказ и резерв" : "Принять заказ"}</button><button type="button" class="btn ghost" id="o-cancel">Отмена</button></div>
       <span class="hint">Остаток резервируется сразу. Отменить заказ можно в его карточке.</span>
     </form>`);
   let n = 0;
-  const addItem = () => { n++; $("#items", dr).insertAdjacentHTML("beforeend", `<div class="grid item" style="grid-template-columns:2.5fr .7fr 1.8fr auto;align-items:end;gap:8px">
+  const addItem = (seed = null) => { n++; $("#items", dr).insertAdjacentHTML("beforeend", `<div class="grid item" style="grid-template-columns:2.5fr .7fr 1.8fr auto;align-items:end;gap:8px">
       <div class="field"><label for="i-sku${n}">Товар</label><select id="i-sku${n}" name="sku" required>${prodOpts}</select></div>
       <div class="field"><label for="i-qty${n}">Кол-во</label><input id="i-qty${n}" name="qty" type="number" inputmode="numeric" min="1" value="1" required></div>
       <div class="field"><label for="i-var${n}">Размер / цвет</label><select id="i-var${n}" name="variant" disabled><option value="">Выберите товар</option></select><small class="hint variant-hint"></small></div>
@@ -359,19 +365,44 @@ async function newOrderForm() {
       select.onchange();
     };
     $(".rm", row).onclick = () => { if ($$(".item", dr).length > 1) row.remove(); else toast("В заказе должен быть хотя бы один товар", true); };
+    if (seed) {
+      qty.value = seed.qty;
+      const sku = $("[name=sku]", row);
+      const product = products.find((p) => p.sku === seed.sku && p.free > 0);
+      if (product) {
+        sku.value = seed.sku; sku.onchange();
+        const variant = product.inventory_variants.find((v) => v.label === seed.variant);
+        if (seed.variant && (!variant || variant.free > 0)) select.value = seed.variant;
+        else if (product.variant_options.length) {
+          if (!$('option[value=""]', select)) select.insertAdjacentHTML("afterbegin", '<option value="">Выберите вариант</option>');
+          select.value = "";
+        }
+        select.onchange();
+      }
+      row.insertAdjacentHTML("beforeend", `<div class="intake-row-note"><b>Из сообщения: ${esc(seed.request)}</b>${[...(seed.errors || []), ...(seed.warnings || [])].map((x) => `<div>${esc(x)}</div>`).join("")}</div>`);
+    }
   };
-  addItem();
-  $("#add-item", dr).onclick = addItem;
+  if (prefill) {
+    [ ["channel", prefill.channel], ["lang", prefill.buyer.lang], ["name", prefill.buyer.name], ["phone", prefill.buyer.phone], ["address", prefill.buyer.address], ["zone", prefill.delivery_zone], ["window", prefill.delivery_window] ].forEach(([key, value]) => { $(`[name=${key}]`, dr).value = value || ""; });
+    for (const m of prefill.missing_fields) {
+      const key = m.field.replace("buyer.", "").replace("delivery_zone", "zone").replace("delivery_window", "window");
+      const el = $(`[name=${key}]`, dr);
+      if (el) { el.closest(".field").classList.add("intake-missing"); el.addEventListener("input", () => el.closest(".field").classList.toggle("intake-missing", !el.value)); }
+    }
+    prefill.items.forEach(addItem);
+  } else addItem();
+  $("#add-item", dr).onclick = () => addItem();
   $("#o-cancel", dr).onclick = closeDrawer;
   const key = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
   $("#of", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
     const f = new FormData(e.target);
     const items = $$(".item", dr).map((row) => ({ sku: $("[name=sku]", row).value, qty: +$("[name=qty]", row).value, variant: $("[name=variant]", row).value }));
-    const r = await api("/api/orders", { method: "POST", headers: { "Idempotency-Key": key }, json: {
-      channel: f.get("channel"), delivery_zone: f.get("zone"), items,
+    const r = await api(prefill ? `/api/ai/order-intake/${prefill.draft_id}/confirm` : "/api/orders", { method: "POST", headers: { "Idempotency-Key": key }, json: {
+      ...(prefill && { reviewed: true }), channel: f.get("channel"), delivery_zone: f.get("zone"), delivery_window: f.get("window"), items,
       buyer: { name: f.get("name"), phone: f.get("phone"), address: f.get("address"), lang: f.get("lang") } } });
     toast("Заказ принят, остаток зарезервирован"); go(location.hash.slice(1) || "dash"); openOrder(r.order_id);
   }); };
+  dr.focus(); dr.scrollTop = 0;
 }
 
 const FLOW = ["new", "paid", "assembled", "shipped", "delivered", "closed"];
@@ -394,6 +425,7 @@ async function openOrder(id) {
         <div class="row between"><span class="muted">Итого</span><b>${money(o.total)}</b></div>
         <hr><div class="muted">Покупатель: ${esc(o.buyer_name || "—")} · ${esc(o.buyer_phone || "")} · язык ${o.buyer_lang}</div>
         <div class="muted">Адрес: ${esc(o.buyer_address || "—")} ${o.address_confirmed ? `<span class="chip ok">подтверждён ${esc(o.delivery_window || "")}</span>` : ""}</div>
+        ${!o.address_confirmed && o.delivery_window ? `<div class="muted">Желаемое получение: ${esc(o.delivery_window)} · ещё не согласовано</div>` : ""}
         ${o.clarification ? `<div class="note ok">Уточнение: ${esc(o.clarification)}</div>` : ""}
       </div>
       <div class="card"><h2>Следующий шаг</h2>
@@ -408,7 +440,7 @@ async function openOrder(id) {
           <form id="addr"><h3>Подтвердить адрес до отправки</h3>
           <div class="field"><input name="address" value="${esc(o.buyer_address || "")}" placeholder="Адрес"></div>
           <div class="grid g2"><div class="field"><select name="zone">${["Тараз", "Жамбылский район", "Байзакский район", "Таласский район", "Другой район области"].map((z) => `<option ${z === o.delivery_zone ? "selected" : ""}>${z}</option>`).join("")}</select></div>
-          <div class="field"><input name="window" placeholder="Окно: завтра 10:00–14:00" required></div></div>
+          <div class="field"><input name="window" value="${esc(o.delivery_window || "")}" placeholder="Окно: завтра 10:00–14:00" required></div></div>
           <button class="btn small">Адрес подтверждён покупателем</button></form>` : ""}
         <div class="row" style="margin-top:10px">${statusBtns}
           ${o.next_statuses.includes("cancelled") ? `<select id="cancel-reason" style="width:auto"><option value="buyer_request">по просьбе покупателя</option><option value="no_stock">нет товара</option><option value="no_payment">нет оплаты</option><option value="other">другое</option></select><button class="btn small danger" id="cancel">Отменить</button>` : ""}</div>
@@ -447,7 +479,7 @@ async function openOrder(id) {
     </div>
 
     <div class="card"><h2>Черновики ИИ по заказу</h2>
-      ${o.drafts.filter((x) => x.task !== "claim_intake" && x.task !== "claim_response").map((x) => renderDraft(x, { sendable: true })).join("") || `<span class="muted">Нет</span>`}</div>
+      ${o.drafts.filter((x) => !["claim_intake", "claim_response", "order_intake"].includes(x.task)).map((x) => renderDraft(x, { sendable: true })).join("") || `<span class="muted">Нет</span>`}</div>
 
     <div class="card"><h2>Претензии</h2>
       ${o.claims.map((c) => `<div class="row between" style="margin-bottom:6px"><a href="#" data-claim="${c.id}">${esc(c.number)}</a> ${timerChip(c.timer, c.status)}</div>`).join("") || `<span class="muted">Нет</span>`}

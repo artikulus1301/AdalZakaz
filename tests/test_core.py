@@ -42,6 +42,232 @@ def make_order(sku="P1", qty=1, channel="instagram"):
                           "items": [{"sku": sku, "qty": qty}]}, "t")
 
 
+def intake_shoes(sku="SN", white=2, black=3):
+    pid = make_product(sku, category="shoes", data={**FULL, "title_ru": "Кроссовки беговые", "title_kk": "Жеңіл кроссовкалар", "color": "белый", "variants": "42 / белый, 42 / чёрный", "price": 18500})
+    with db.tx() as c:
+        inventory.set_variants(c, pid, [{"label": "42 / белый", "stock": white}, {"label": "42 / чёрный", "stock": black}])
+    return pid
+
+
+def intake_client():
+    from fastapi.testclient import TestClient
+    from app.main import app, SESSION
+    client = TestClient(app)
+    client.cookies.set("adal_session", SESSION)
+    return client
+
+
+def test_message_draft_uses_catalog_and_does_not_reserve():
+    from app.ai.order_intake import create_draft
+    intake_shoes()
+    r = create_draft("Нужны белые кроссовки 42 размера, доставка завтра")
+    item, = r["items"]
+    assert (item["sku"], item["variant"], item["qty"], item["price"], item["available"]) == ("SN", "42 / белый", 1, 18500, True)
+    assert "завтра" in r["delivery_window"]
+    assert {"buyer.name", "buyer.phone", "buyer.address"} <= {m["field"] for m in r["missing_fields"]}
+    with db.read() as c:
+        assert c.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+        assert c.execute("SELECT SUM(reserved) FROM products").fetchone()[0] == 0
+
+
+def test_spoken_size_is_distinct_from_quantity():
+    from app.ai.order_intake import preview_line
+    pid = intake_shoes()
+    with db.read() as c:
+        item = preview_line("Нужны две пары белых кроссовок сорок второго размера", [passport.get_product(c, pid)])
+    assert (item["qty"], item["variant"]) == (2, "42 / белый")
+
+
+def test_intake_kazakh_multiple_items_and_local_contacts():
+    from app.ai.order_intake import create_draft
+    intake_shoes(white=4)
+    make_product("DR", stock=4)
+    r = create_draft("Ақ кроссовки 42 өлшем 2 дана; көк көйлек 1 дана; Атым: Алия; телефон: +7 701 123 45 67; адрес: Тараз, Абая 10; жеткізу ертең")
+    assert [(x["sku"], x["qty"]) for x in r["items"]] == [("SN", 2), ("DR", 1)]
+    assert r["buyer"]["name"] == "Алия"
+    assert r["buyer"]["phone"] == "+77011234567"
+    assert r["buyer"]["address"] == "Тараз, Абая 10"
+    assert r["buyer"]["lang"] == "kk"
+
+
+@pytest.mark.parametrize("message", ["кроссовки 45 размера белые", "кроссовки 42 размера красные"])
+def test_intake_does_not_substitute_unavailable_variant(message):
+    from app.ai.order_intake import create_draft
+    intake_shoes()
+    item = create_draft(message)["items"][0]
+    assert item["variant"] is None and item["errors"] and item["available"] is None
+
+
+def test_intake_ambiguous_and_unknown_products_stay_visible():
+    from app.ai.order_intake import create_draft
+    intake_shoes("A")
+    intake_shoes("B")
+    rows = create_draft("белые кроссовки 42 размера; пылесос 1 шт")["items"]
+    assert len(rows) == 2
+    assert rows[0]["sku"] is None and len(rows[0]["candidates"]) == 2
+    assert rows[1]["sku"] is None and rows[1]["errors"]
+
+
+def test_intake_checks_full_basket_stock():
+    from app.ai.order_intake import create_draft
+    intake_shoes(white=1)
+    rows = create_draft("белые кроссовки 42 размера; белые кроссовки 42 размера")["items"]
+    assert all(x["available"] is False for x in rows)
+    make_product("DR", stock=1, data={**FULL, "variants": "M, L"})
+    rows = create_draft("платье M; платье L")["items"]
+    assert all(x["available"] is False and x["warnings"] for x in rows)
+
+
+def test_intake_rejects_hallucinated_model_excerpt_and_redacts(monkeypatch):
+    from app.ai import order_intake
+    intake_shoes()
+    def fake_call(task, payload, heuristic):
+        assert "Алия" not in payload["buyer_message"] and "77011234567" not in payload["buyer_message"]
+        assert "Абая" not in payload["buyer_message"]
+        return {"items": [{"text": "красные кроссовки 44 размера"}], "_source": "llm"}, "fake"
+    monkeypatch.setattr(orchestrator, "_call", fake_call)
+    r = order_intake.create_draft("белые кроссовки 42 размера; имя: Алия; телефон: +77011234567; адрес: Абая 10")
+    assert r["source"] == "fallback" and r["items"][0]["variant"] == "42 / белый"
+
+
+def test_intake_confirm_is_explicit_and_idempotent_with_catalog_price():
+    intake_shoes()
+    with intake_client() as client:
+        draft = client.post("/api/ai/order-intake", json={"text": "белые кроссовки 42 размера"}).json()
+        body = {"channel": "whatsapp", "buyer": {"name": "Алия"}, "items": [{"sku": "SN", "variant": "42 / белый", "qty": 1, "price": 1}], "delivery_window": "завтра"}
+        url = f"/api/ai/order-intake/{draft['draft_id']}/confirm"
+        assert client.post(url, json=body).status_code == 422
+        assert client.post(url, json={**body, "reviewed": False}).status_code == 422
+        first = client.post(url, json={**body, "reviewed": True})
+        assert first.status_code == 200, first.text
+        second = client.post(url, json={**body, "reviewed": True})
+        assert first.json()["order_id"] == second.json()["order_id"]
+        order = client.get(f"/api/orders/{first.json()['order_id']}").json()
+        assert order["total"] == 18500 and order["address_confirmed"] == 0
+        assert order["delivery_window"] == "завтра"
+    with db.read() as c:
+        assert c.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+        assert c.execute("SELECT SUM(reserved) FROM products").fetchone()[0] == 1
+        assert c.execute("SELECT status FROM ai_drafts").fetchone()[0] == "approved"
+
+
+def test_intake_rechecks_stock_and_allows_corrected_retry():
+    intake_shoes(white=1)
+    with intake_client() as client:
+        draft = client.post("/api/ai/order-intake", json={"text": "белые кроссовки 42 размера"}).json()
+        manual.submit({"channel": "telegram", "buyer": {}, "items": [{"sku": "SN", "variant": "42 / белый", "qty": 1}]}, "t")
+        body = {"channel": "whatsapp", "buyer": {"name": "Алия"}, "items": [{"sku": "SN", "variant": "42 / белый", "qty": 1}], "reviewed": True}
+        url = f"/api/ai/order-intake/{draft['draft_id']}/confirm"
+        assert client.post(url, json=body).status_code == 409
+        with db.read() as c:
+            assert c.execute("SELECT status FROM ai_drafts").fetchone()[0] in ("draft", "shadow")
+        body["items"][0]["variant"] = "42 / чёрный"
+        assert client.post(url, json=body).status_code == 200
+
+
+def test_voice_intake_with_mocked_recognition_and_invalid_audio(monkeypatch):
+    import io
+    import wave
+    from app.ai import speech
+    intake_shoes()
+    # Exercise the speech boundary without an external service or a real microphone.
+    monkeypatch.setattr(speech, "available", lambda: True)
+    monkeypatch.setattr(speech, "transcribe", lambda audio, mime: {"text": "белые кроссовки 42 размера"})
+    monkeypatch.setattr(orchestrator, "_call", lambda task, payload, heuristic: ({**heuristic, "_source": "demo"}, "test"))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed")); wav.writeframes(b"\0\0" * 1600)
+    with intake_client() as client:
+        r = client.post("/api/ai/order-intake/voice", files={"file": ("voice.wav", buf.getvalue(), "audio/wav")})
+        assert r.status_code == 200, r.text
+        assert r.json()["source_kind"] == "voice" and r.json()["transcript"]
+        assert r.json()["items"][0]["variant"] == "42 / белый"
+        assert client.post("/api/ai/order-intake/voice", files={"file": ("bad.wav", b"bad", "audio/wav")}).status_code == 400
+        monkeypatch.setattr(speech, "transcribe", lambda audio, mime: {"text": ""})
+        assert client.post("/api/ai/order-intake/voice", files={"file": ("voice.wav", buf.getvalue(), "audio/wav")}).status_code == 422
+    with db.read() as c:
+        assert c.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+
+
+def test_intake_auth_and_unconfigured_speech(monkeypatch):
+    from app.ai import speech
+    monkeypatch.setattr(speech, "available", lambda: False)
+    with intake_client() as client:
+        assert client.post("/api/ai/order-intake/voice", files={"file": ("voice.wav", b"bad", "audio/wav")}).status_code == 503
+        client.cookies.clear()
+        assert client.post("/api/ai/order-intake", json={"text": "заказ"}).status_code == 401
+
+
+def test_speech_refusal_is_not_a_transcript(monkeypatch):
+    from app import config
+    from app.ai import speech
+    monkeypatch.setattr(config, "ASR_PROVIDER", "llm")
+    monkeypatch.setattr(speech, "available", lambda: True)
+    monkeypatch.setattr(speech.llm, "transcribe", lambda audio, mime: ("Я не могу обработать аудио в этом запросе.", "test"))
+    with pytest.raises(CoreError, match="не смогла принять аудио"):
+        speech.transcribe(b"audio")
+
+
+def test_local_speech_output_and_busy_handling(monkeypatch):
+    from types import SimpleNamespace
+    from app import config
+    from app.ai import speech
+    monkeypatch.setattr(config, "ASR_PROVIDER", "local")
+    monkeypatch.setattr(speech, "available", lambda: True)
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            return iter([SimpleNamespace(text=" Белые кроссовки 42 размера ")]), SimpleNamespace(language="ru")
+    monkeypatch.setattr(speech, "local_model", lambda: Model())
+    assert speech.transcribe(b"audio")["text"] == "Белые кроссовки 42 размера"
+    assert speech._lock.acquire(blocking=False)
+    try:
+        with pytest.raises(CoreError, match="другая запись"):
+            speech.transcribe(b"audio")
+    finally:
+        speech._lock.release()
+
+
+def test_concurrent_intake_confirmation_reserves_once():
+    from concurrent.futures import ThreadPoolExecutor
+    from app.ai.order_intake import create_draft
+    intake_shoes(white=1)
+    did = create_draft("белые кроссовки 42 размера")["draft_id"]
+    payload = {"channel": "whatsapp", "intake_draft_id": did, "buyer": {"name": "Тест"},
+               "items": [{"sku": "SN", "variant": "42 / белый", "qty": 1}]}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: manual.submit(payload, "t"), range(2)))
+    assert all(r["status"] == "done" for r in results)
+    assert results[0]["order_id"] == results[1]["order_id"]
+    with db.read() as c:
+        assert c.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+        assert c.execute("SELECT SUM(reserved) FROM products").fetchone()[0] == 1
+
+
+def test_intake_model_cannot_silently_omit_unknown_product(monkeypatch):
+    from app.ai.order_intake import create_draft
+    intake_shoes()
+    monkeypatch.setattr(orchestrator, "_call", lambda *args: ({"items": [{"text": "белые кроссовки 42 размера"}], "_source": "llm"}, "test"))
+    result = create_draft("белые кроссовки 42 размера; пылесос")
+    assert result["source"] == "fallback"
+    assert len(result["items"]) == 2 and result["items"][1]["sku"] is None
+
+
+def test_voice_limits_are_checked_before_recognition(monkeypatch):
+    import io
+    import wave
+    from app.ai import speech
+    monkeypatch.setattr(speech, "available", lambda: True)
+    def should_not_run(*args):
+        pytest.fail("Invalid audio must not reach recognition")
+    monkeypatch.setattr(speech, "transcribe", should_not_run)
+    with intake_client() as client:
+        assert client.post("/api/ai/order-intake/voice", files={"file": ("huge.wav", b"0" * (10 * 1024 * 1024 + 1), "audio/wav")}).status_code == 413
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wav:
+            wav.setparams((1, 2, 16000, 0, "NONE", "not compressed")); wav.writeframes(b"\0\0" * 16000 * 121)
+        assert client.post("/api/ai/order-intake/voice", files={"file": ("long.wav", buf.getvalue(), "audio/wav")}).status_code == 400
+
+
 def deliver(oid):
     with db.tx() as c:
         o = orders.get(c, oid)

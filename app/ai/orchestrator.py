@@ -101,7 +101,7 @@ def order_context(c: sqlite3.Connection, order_id: int) -> tuple[dict, dict, dic
         "order": {
             "number": o["number"], "channel": o["channel"], "status": o["status_label"],
             "payment": "оплачен" if o["payment_status"] == "paid" else "не оплачен",
-            "total_tg": o["total"], "delivery_zone": o["delivery_zone"], "delivery_window": o["delivery_window"],
+            "total_tg": o["total"], "delivery_zone": o["delivery_zone"], "delivery_window": o["delivery_window"] if o["address_confirmed"] else None,
             "address_confirmed": bool(o["address_confirmed"]), "clarification": o["clarification"],
             "delivered_at": o["delivered_at"],
         },

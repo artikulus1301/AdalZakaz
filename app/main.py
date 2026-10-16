@@ -5,6 +5,9 @@ import hmac
 import logging
 import os
 import uuid
+import io
+import wave
+from typing import Literal
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -12,10 +15,12 @@ import segno
 from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, StrictInt
 
 from . import config, db, seed
 from .ai import orchestrator as ai
+from .ai import order_intake, speech
 from .ai.llm import llm
 from .connectors import kaspi, manual
 from .core import CoreError, claims, events, evidence, inventory, metrics, orders, passport, rules
@@ -113,6 +118,7 @@ def meta(who: str = Depends(seller)):
         "evidence_kinds": evidence.KINDS, "reason_tags": {k: v[0] for k, v in ai.REASON_TAGS.items()},
         "ai": {"available": llm.available, "provider": config.LLM_PROVIDER, "base_url": config.QWEN_BASE_URL, "text_model": config.QWEN_TEXT_MODEL, "vl_model": config.QWEN_VL_MODEL,
                "asr_model": config.QWEN_ASR_MODEL, "mode": mode},
+        "speech": {"available": speech.available(), "provider": config.ASR_PROVIDER},
         "kaspi_mode": "api" if config.KASPI_TOKEN else "demo",
         "seller_name": seller_name, "public_base_url": config.PUBLIC_BASE_URL,
     }
@@ -286,11 +292,71 @@ class OrderIn(BaseModel):
     buyer: dict
     items: list[dict]
     delivery_zone: str | None = None
+    delivery_window: str | None = Field(default=None, max_length=200)
 
 
 @app.post("/api/orders")
 def create_order(body: OrderIn, who: str = Depends(seller), idempotency_key: str | None = Header(default=None)):
     r = manual.submit(body.model_dump(), who, idempotency_key)
+    if r.get("status") != "done":
+        raise CoreError(r.get("error") or "Заказ не принят", status=409, code=r.get("status", "rejected"))
+    return r
+
+
+class OrderIntakeIn(BaseModel):
+    text: str = Field(min_length=1, max_length=6000)
+    channel: str = "whatsapp"
+
+
+class OrderIntakeConfirm(OrderIn):
+    reviewed: Literal[True]
+
+
+@app.post("/api/ai/order-intake")
+def parse_order_message(body: OrderIntakeIn, who: str = Depends(seller)):
+    return order_intake.create_draft(body.text, body.channel)
+
+
+@app.post("/api/ai/order-intake/voice")
+async def parse_order_voice(file: UploadFile = File(...), channel: str = Form("whatsapp"), who: str = Depends(seller)):
+    if channel not in orders.CHANNELS or channel == "kaspi":
+        raise CoreError("Выберите канал соцсетей, OLX или сайта")
+    if not speech.available():
+        raise CoreError("Распознавание голоса не настроено. Установите модуль речи на сервере или вставьте текст сообщения.", status=503)
+    limit = min(config.MAX_UPLOAD_MB, 10) * 1024 * 1024
+    audio = await file.read(limit + 1)
+    if len(audio) > limit:
+        raise CoreError("Аудиофайл слишком большой (максимум 10 МБ)", status=413)
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as wav:
+            frames = wav.getnframes()
+            if wav.getframerate() != 16000 or wav.getnchannels() != 1 or wav.getsampwidth() != 2:
+                raise ValueError()
+            if not 0 < frames <= 16000 * 120 or len(wav.readframes(frames)) != frames * 2:
+                raise ValueError()
+    except (wave.Error, EOFError, ValueError):
+        raise CoreError("Нужно аудио WAV 16 кГц моно длительностью до 2 минут. Попробуйте другой файл.")
+    try:
+        transcript = await run_in_threadpool(speech.transcribe, audio, "audio/wav")
+    except CoreError:
+        raise
+    except Exception:
+        raise CoreError("Не удалось распознать голос. Попробуйте ещё раз или вставьте текст.", status=502)
+    text = str(transcript.get("text") or "").strip()
+    if not text:
+        raise CoreError("Речь не распознана. Попробуйте более чёткую запись или вставьте текст.", status=422)
+    result = await run_in_threadpool(order_intake.create_draft, text, channel, "voice")
+    return {**result, "speech_source": transcript.get("source"), "speech_model": transcript.get("model")}
+
+
+@app.post("/api/ai/order-intake/{did}/confirm")
+def confirm_order_intake(did: int, body: OrderIntakeConfirm, who: str = Depends(seller)):
+    if not str(body.buyer.get("name") or "").strip():
+        raise CoreError("Укажите имя покупателя")
+    if not 1 <= len(body.items) <= 20:
+        raise CoreError("Укажите от 1 до 20 товарных позиций")
+    items = [{"sku": it.get("sku"), "qty": it.get("qty"), "variant": it.get("variant")} for it in body.items]
+    r = manual.submit({**body.model_dump(exclude={"reviewed"}), "items": items, "intake_draft_id": did}, who)
     if r.get("status") != "done":
         raise CoreError(r.get("error") or "Заказ не принят", status=409, code=r.get("status", "rejected"))
     return r

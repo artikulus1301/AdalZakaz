@@ -8,6 +8,7 @@ const VoiceRecorder = (() => {
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     rec.start();
     return {
+      cancel: () => { if (rec.state !== "inactive") rec.stop(); stream.getTracks().forEach((t) => t.stop()); },
       stop: () => new Promise((resolve) => {
         rec.onstop = async () => {
           stream.getTracks().forEach((t) => t.stop());
@@ -19,11 +20,12 @@ const VoiceRecorder = (() => {
     };
   }
 
-  async function toWav(blob) {
+  async function toWav(blob, maxSeconds = Infinity) {
     const buf = await blob.arrayBuffer();
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const decoded = await ctx.decodeAudioData(buf);
-    ctx.close();
+    let decoded;
+    try { decoded = await ctx.decodeAudioData(buf); } finally { await ctx.close(); }
+    if (!decoded.duration || decoded.duration > maxSeconds) throw new Error("Запись должна быть не длиннее 2 минут");
     const rate = 16000;
     const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * rate), rate);
     const src = off.createBufferSource();
@@ -44,5 +46,5 @@ const VoiceRecorder = (() => {
     return new Blob([view], { type: "audio/wav" });
   }
 
-  return { start };
+  return { start, toWav };
 })();

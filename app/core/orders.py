@@ -52,6 +52,15 @@ def _new_number(c: sqlite3.Connection, order_id: int) -> str:
 
 def create(c: sqlite3.Connection, payload: dict, actor: str) -> int:
     """Создаёт заказ из нормализованного входящего события. Без свободного остатка заказ не принимается."""
+    intake_id = payload.get("intake_draft_id")
+    if intake_id is not None:
+        draft = c.execute("SELECT * FROM ai_drafts WHERE id=? AND task='order_intake'", (intake_id,)).fetchone()
+        if not draft:
+            raise NotFound("Черновик заказа")
+        if draft["order_id"]:
+            return draft["order_id"]
+        if draft["status"] not in ("draft", "shadow"):
+            raise CoreError("Этот черновик уже закрыт", status=409)
     channel = payload.get("channel")
     if channel not in CHANNELS:
         raise CoreError("Неизвестный канал")
@@ -86,7 +95,9 @@ def create(c: sqlite3.Connection, payload: dict, actor: str) -> int:
         pv = passport.get_version(c, p["id"])
         variant, variant_id = inventory.resolve_variant(c, p["id"], it.get("variant"), pv["data"])
         inventory.reserve(c, p["id"], qty, variant_id)
-        price = int(it.get("price") or pv["data"].get("price") or 0)
+        price = int((None if intake_id else it.get("price")) or pv["data"].get("price") or 0)
+        if intake_id and price <= 0:
+            raise CoreError("Укажите цену товара в каталоге")
         c.execute(
             "INSERT INTO order_items(order_id, product_id, passport_version, qty, price, variant, variant_id) VALUES (?,?,?,?,?,?,?)",
             (oid, p["id"], pv["version"], qty, price, variant, variant_id),
@@ -94,6 +105,10 @@ def create(c: sqlite3.Connection, payload: dict, actor: str) -> int:
         total += price * qty
     c.execute("UPDATE orders SET total = ? WHERE id = ?", (total, oid))
     events.log(c, "order_created", actor, order_id=oid, payload={"number": number, "channel": channel, "total": total})
+    if intake_id:
+        c.execute("UPDATE ai_drafts SET order_id=?, status='approved', reviewed_at=?, text_final=? WHERE id=?",
+                  (oid, db.now_iso(), f"Подтверждён продавцом: {number}", intake_id))
+        events.log(c, "order_intake_confirmed", actor, order_id=oid, payload={"draft_id": intake_id})
 
     if payload.get("paid_via") == "kaspi_api":
         confirm_payment(c, oid, "kaspi_api", f"kaspi:{ext or number}", total, actor)
