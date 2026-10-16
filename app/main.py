@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 from . import config, db, seed
 from .ai import orchestrator as ai
-from .ai import order_intake, speech
+from .ai import copilot, order_intake, speech
 from .ai.llm import llm
 from .connectors import kaspi, manual
 from .core import CoreError, claims, events, evidence, inventory, metrics, orders, passport, rules
@@ -584,6 +584,39 @@ def review(did: int, body: ReviewIn, who: str = Depends(seller)):
 @app.post("/api/ai/transcribe")
 async def transcribe(file: UploadFile = File(...), who: str = Depends(seller)):
     return ai.transcribe(await file.read(), file.content_type or "audio/wav")
+
+
+# ---------------- Adal Copilot: чат с ИИ-помощником ----------------
+# Вопросы — ответ по данным ядра (RAG). Поручения — план, который выполняется только после одобрения продавца.
+
+class CopilotIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    chat_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{8,32}$")
+
+
+@app.get("/api/copilot/chats")
+def copilot_chats(who: str = Depends(seller)):
+    return copilot.chats()
+
+
+@app.get("/api/copilot/chat")
+def copilot_history(chat_id: str | None = None, who: str = Depends(seller)):
+    return copilot.history(chat_id)
+
+
+@app.post("/api/copilot/chat")
+def copilot_send(body: CopilotIn, who: str = Depends(seller)):
+    return copilot.send(body.chat_id, body.text, who)
+
+
+@app.post("/api/copilot/plans/{plan_id}/approve")
+def copilot_approve(plan_id: int, who: str = Depends(seller)):
+    return copilot.approve(plan_id, who)
+
+
+@app.post("/api/copilot/plans/{plan_id}/reject")
+def copilot_reject(plan_id: int, who: str = Depends(seller)):
+    return copilot.reject(plan_id, who)
 
 
 # ---------------- аналитика и правила ----------------
