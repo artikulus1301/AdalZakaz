@@ -281,8 +281,11 @@ function metricTiles(m) {
     ${t(m.claims_overdue_open, "просроченных претензий", m.claims_overdue_open > 0)}
     ${t(m.claim_resolution_avg_days == null ? "—" : m.claim_resolution_avg_days + " дн.", "средний срок решения")}
     ${t(p(m.ai_drafts_edited_rate), `черновиков ИИ исправлено человеком (из ${m.ai_drafts_reviewed})`)}
-    ${t(money(m.revenue), "выручка (без отмен)")}
-    ${t(money(m.refunds), "возвращено денег")}
+    ${t(money(m.orders_value), "сумма заказов (без отмен)")}
+    ${t(money(m.payments_received), "подтверждено оплат, включая отменённые заказы")}
+    ${t(money(m.unpaid_orders_value), "ожидается оплата")}
+    ${t(money(m.revenue), "оплаты за вычетом зарегистрированных возвратов")}
+    ${t(money(m.refunds), "зарегистрировано возвратов денег")}
   </div>`;
 }
 
@@ -318,7 +321,7 @@ async function viewOrders() {
 async function newOrderForm() {
   const products = await api("/api/products");
   const channels = Object.entries(META.channels).filter(([k]) => k !== "kaspi");
-  const prodOpts = products.map((p) => `<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.passport.data.title_ru)} (свободно ${p.free})</option>`).join("");
+  const prodOpts = `<option value="" selected disabled>Выберите товар</option>` + products.map((p) => `<option value="${esc(p.sku)}" ${p.free <= 0 ? "disabled" : ""}>${esc(p.sku)} — ${esc(p.passport.data.title_ru)} (свободно ${p.free})</option>`).join("");
   const dr = openDrawer(`<h1>Новый заказ</h1>
     <p class="muted">Для OLX, Instagram, WhatsApp, Telegram. Заказы Kaspi приходят только через API. Заказ проходит через ту же очередь и резерв, что и Kaspi.</p>
     <form id="of" class="card">
@@ -336,12 +339,27 @@ async function newOrderForm() {
       <span class="hint">Остаток резервируется сразу. Отменить заказ можно в его карточке.</span>
     </form>`);
   let n = 0;
-  const addItem = () => { n++; $("#items", dr).insertAdjacentHTML("beforeend", `<div class="grid item" style="grid-template-columns:3fr 1fr 1fr auto;align-items:end;gap:8px">
-      <div class="field"><label for="i-sku${n}">Товар</label><select id="i-sku${n}" name="sku">${prodOpts}</select></div>
+  const addItem = () => { n++; $("#items", dr).insertAdjacentHTML("beforeend", `<div class="grid item" style="grid-template-columns:2.5fr .7fr 1.8fr auto;align-items:end;gap:8px">
+      <div class="field"><label for="i-sku${n}">Товар</label><select id="i-sku${n}" name="sku" required>${prodOpts}</select></div>
       <div class="field"><label for="i-qty${n}">Кол-во</label><input id="i-qty${n}" name="qty" type="number" inputmode="numeric" min="1" value="1" required></div>
-      <div class="field"><label for="i-var${n}">Вариант</label><input id="i-var${n}" name="variant" placeholder="M, 42…"></div>
+      <div class="field"><label for="i-var${n}">Размер / цвет</label><select id="i-var${n}" name="variant" disabled><option value="">Выберите товар</option></select><small class="hint variant-hint"></small></div>
       <div class="field"><button type="button" class="icon-btn rm" aria-label="Убрать товар">${icon("x")}</button></div></div>`);
-    $$(".item .rm", dr).forEach((b) => (b.onclick = () => { if ($$(".item", dr).length > 1) b.closest(".item").remove(); else toast("В заказе должен быть хотя бы один товар", true); })); };
+    const row = $("#items", dr).lastElementChild;
+    const select = $("[name=variant]", row), qty = $("[name=qty]", row);
+    $("[name=sku]", row).onchange = () => {
+      const p = products.find((p) => p.sku === $("[name=sku]", row).value);
+      const opts = p.variant_options || [];
+      select.disabled = !opts.length; select.required = !!opts.length;
+      select.innerHTML = (opts.length > 1 ? `<option value="">Выберите вариант</option>` : "") + (opts.length ? opts.map((label) => {
+        const v = p.inventory_variants.find((v) => v.label === label);
+        return `<option value="${esc(label)}" ${v && v.free <= 0 ? "disabled" : ""}>${esc(label)}${v ? ` — доступно ${v.free}` : ""}</option>`;
+      }).join("") : `<option value="">Без вариантов</option>`);
+      $(".variant-hint", row).textContent = opts.length && !p.inventory_variants.length ? "Остаток общий. Настройте количество каждого размера в карточке товара." : "";
+      select.onchange = () => { const v = p.inventory_variants.find((v) => v.label === select.value); qty.max = v ? v.free : p.free; };
+      select.onchange();
+    };
+    $(".rm", row).onclick = () => { if ($$(".item", dr).length > 1) row.remove(); else toast("В заказе должен быть хотя бы один товар", true); };
+  };
   addItem();
   $("#add-item", dr).onclick = addItem;
   $("#o-cancel", dr).onclick = closeDrawer;
@@ -352,7 +370,7 @@ async function newOrderForm() {
     const r = await api("/api/orders", { method: "POST", headers: { "Idempotency-Key": key }, json: {
       channel: f.get("channel"), delivery_zone: f.get("zone"), items,
       buyer: { name: f.get("name"), phone: f.get("phone"), address: f.get("address"), lang: f.get("lang") } } });
-    toast("Заказ принят, остаток зарезервирован"); openOrder(r.order_id);
+    toast("Заказ принят, остаток зарезервирован"); go(location.hash.slice(1) || "dash"); openOrder(r.order_id);
   }); };
 }
 
@@ -442,7 +460,7 @@ async function openOrder(id) {
       ${o.events.map((e) => `<li>${dt(e.created_at)} — ${esc(EVENT_LABELS[e.type] || e.type)} <small class="muted">· ${esc(e.actor)}${e.payload?.kind ? " · " + esc(META.evidence_kinds[e.payload.kind]) : ""}${e.payload?.ref ? " · " + esc(e.payload.ref) : ""}${e.payload?.decision ? " · " + esc(META.decisions[e.payload.decision]) : ""}</small></li>`).join("")}
     </ul></details></div>`);
 
-  const reload = () => openOrder(id);
+  const reload = () => { go(location.hash.slice(1) || "dash"); return openOrder(id); };
   const post = (url, json) => api(url, { method: "POST", json });
   $("#pay", dr) && ($("#pay", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
     act(e.submitter, async () => { await post(`/api/orders/${id}/payment`, { source: f.get("source"), ref: f.get("ref"), amount: +f.get("amount") }); toast("Оплата подтверждена"); reload(); }); });
@@ -482,13 +500,38 @@ async function viewProducts() {
       ${list.map((p) => { const ch = p.passport.check_result || {}; const miss = (ch.missing || []).length, ai = (ch.ai_issues || []).length;
         return `<tr class="click" data-p="${p.id}"><td>${esc(p.sku)}</td><td>${esc(p.passport.data.title_ru)}</td><td class="hide-sm">${esc(p.category_label)}</td>
         <td class="num">${p.stock}</td><td class="num">${p.reserved}</td><td class="num" ${p.free <= 0 ? 'style="color:var(--bad)"' : ""}>${p.free}</td>
-        <td>v${p.current_version} ${miss ? `<span class="chip bad">нет ${miss} полей</span>` : `<span class="chip ok">поля есть</span>`} ${ai ? `<span class="chip warn">${ai} замеч.</span>` : ""}</td></tr>`; }).join("")}
+        <td>v${p.current_version} ${miss ? `<span class="chip bad">нет ${miss} полей</span>` : `<span class="chip ok">поля есть</span>`} ${ai ? `<span class="chip warn">${ai} замеч.</span>` : ""}
+        ${p.variant_options.length && !p.inventory_variants.length ? `<span class="chip warn">остаток общий</span>` : ""}</td></tr>`; }).join("")}
     </table></div></div>`;
   $$("[data-p]").forEach((r) => (r.onclick = () => openProduct(r.dataset.p)));
   $("#new-p").onclick = () => openProduct(null);
 }
 
 const FIELD_ORDER = ["title_ru", "title_kk", "brand", "model", "country", "composition", "dimensions", "weight", "color", "size_grid", "variants", "package_contents", "warranty_months", "price", "desc_ru", "desc_kk", "supplier_text"];
+
+function variantStockRow(label = "", stock = "", reserved = 0, locked = false) {
+  return `<div class="variant-stock-row">
+    <label>Размер / цвет<input name="variant-label" value="${esc(label)}" placeholder="Например: 42 / белый" maxlength="100" required ${locked ? "readonly" : ""}></label>
+    <label>На складе<input name="variant-stock" type="number" inputmode="numeric" value="${stock}" min="${reserved}" step="1" required></label>
+    <small class="muted">В резерве: ${reserved}</small>
+    ${locked ? "" : `<button type="button" class="btn small remove-variant">Убрать</button>`}</div>`;
+}
+
+function stockEditor(p) {
+  const tracked = p.inventory_variants.length > 0;
+  return `<div class="card" id="variant-stock-card"><h2>Остатки по размерам и цветам</h2>
+    ${tracked ? `<p class="muted">Общий остаток ${p.stock}, резерв ${p.reserved}. Укажите фактическое количество на складе, включая резерв.</p>` : `
+      <form id="st" class="row"><label>Общий остаток<input name="stock" type="number" min="${p.reserved}" step="1" value="${p.stock}" required></label><button class="btn small">Сохранить общий остаток</button></form>
+      <p class="muted">Чтобы проверять наличие конкретного размера и цвета, распределите фактический остаток по вариантам.</p>`}
+    ${!tracked && p.reserved ? `<div class="note warn">Сначала завершите или отмените заказы с резервом (${p.reserved} шт.). После этого можно включить учёт по вариантам.</div>` : `
+    <details ${tracked ? "open" : ""}><summary>${tracked ? "Изменить остатки вариантов" : "Настроить размеры и цвета"}</summary>
+      <form id="variant-stock-form">
+        <p class="hint">Одна строка — одна комбинация, например «42 / белый». ${tracked ? "Название существующего варианта сохраняется; для снятия с продажи укажите 0." : `Общий остаток сейчас ${p.stock}. Укажите количество каждого варианта — их сумма станет новым общим остатком.`}</p>
+        <div id="variant-stock-rows">${tracked ? p.inventory_variants.map((v) => variantStockRow(v.label, v.stock, v.reserved, true)).join("") : (p.variant_options.length ? p.variant_options : [""]).map((v) => variantStockRow(v)).join("")}</div>
+        <div class="row"><button type="button" class="btn small" id="add-stock-variant">Добавить размер / цвет</button><button class="btn primary small">Сохранить остатки вариантов</button></div>
+      </form></details>`}
+  </div>`;
+}
 async function openProduct(id) {
   const p = id ? await api(`/api/products/${id}`) : null;
   const data = p ? p.passport.data : {};
@@ -497,7 +540,8 @@ async function openProduct(id) {
   const area = (k) => ["desc_ru", "desc_kk", "supplier_text", "size_grid", "package_contents"].includes(k);
   const fields = FIELD_ORDER.map((k) => `<div class="field ${missing.has(k) ? "missing" : ""}" ${area(k) ? 'style="grid-column:1/-1"' : ""}>
       <label>${esc(META.fields[k])} ${req.has(k) ? `<span class="req">*</span>` : ""}</label>
-      ${area(k) ? `<textarea name="${k}" rows="${k.startsWith("desc") ? 4 : 2}">${esc(data[k] ?? "")}</textarea>` : `<input name="${k}" value="${esc(data[k] ?? "")}">`}</div>`).join("");
+      ${area(k) ? `<textarea name="${k}" rows="${k.startsWith("desc") ? 4 : 2}">${esc(data[k] ?? "")}</textarea>` : `<input name="${k}" value="${esc(data[k] ?? "")}" ${k === "variants" && p?.inventory_variants.length ? 'readonly aria-describedby="variant-edit-hint"' : ""}>`}
+      ${k === "variants" && p?.inventory_variants.length ? `<small class="hint" id="variant-edit-hint">Добавляйте варианты в блоке «Остатки по размерам и цветам».</small>` : ""}</div>`).join("");
   const ch = p?.passport.check_result || {};
   const dr = openDrawer(`
     <h1>${p ? esc(data.title_ru) : "Новый товар"}</h1>
@@ -526,8 +570,7 @@ async function openProduct(id) {
           <div class="thumbs">${(data.photos || []).map((f) => `<img src="/files/${encodeURIComponent(f)}" alt="">`).join("") || `<span class="muted">Нет фото</span>`}</div>
           <form id="ph" class="row" style="margin-top:8px"><input type="file" name="file" accept="image/*" capture="environment" required style="width:auto"><button class="btn small">Добавить</button></form>
           <small class="muted">ИИ (модель со зрением) сверит фото с полями паспорта: цвет, комплект, маркировку.</small></div>
-        <div class="card"><h2>Остаток</h2><form id="st" class="row"><input name="stock" type="number" value="${p.stock}" style="width:120px"><button class="btn small">Сохранить</button></form>
-          <small class="muted">Один остаток на все каналы.</small></div>
+        ${stockEditor(p)}
         <div class="card"><h2>Страница-паспорт для OLX и соцсетей</h2>
           <div class="row"><div class="qr">${await api(`/api/products/${p.id}/qr.svg`)}</div><div><a href="${esc(p.public_url)}" target="_blank">${esc(p.public_url)}</a>
           <p class="muted">Ссылку и QR — в объявление OLX или в профиль Instagram.</p></div></div></div>
@@ -542,11 +585,22 @@ async function openProduct(id) {
     else { const np = await api("/api/products", { method: "POST", json: { sku: f.sku, category: f.category, stock: +f.stock, data: pdata } }); toast("Паспорт создан"); openProduct(np.id); }
   }); };
   if (!p) return;
-  const reload = () => openProduct(p.id);
+  const reload = () => { go(location.hash.slice(1) || "products"); return openProduct(p.id); };
   $("#ai-check", dr).onclick = (e) => act(e.currentTarget, async () => { await api(`/api/products/${p.id}/ai/check`, { method: "POST" }); reload(); });
   $("#ai-draft", dr).onclick = (e) => act(e.currentTarget, async () => { await api(`/api/products/${p.id}/ai/draft`, { method: "POST" }); reload(); });
   $("#ph", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/products/${p.id}/photos`, { method: "POST", body: new FormData(e.target) }); toast("Фото добавлено — новая версия паспорта"); reload(); }); };
-  $("#st", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/products/${p.id}/stock`, { method: "POST", json: { stock: +new FormData(e.target).get("stock") } }); toast("Остаток сохранён"); reload(); }); };
+  if ($("#st", dr)) $("#st", dr).onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => { await api(`/api/products/${p.id}/stock`, { method: "POST", json: { stock: +new FormData(e.target).get("stock") } }); toast("Остаток сохранён"); reload(); }); };
+  const vf = $("#variant-stock-form", dr);
+  if (vf) {
+    const bindRemove = () => $$(".remove-variant", vf).forEach((b) => b.onclick = () => b.closest(".variant-stock-row").remove());
+    bindRemove();
+    $("#add-stock-variant", vf).onclick = () => { $("#variant-stock-rows", vf).insertAdjacentHTML("beforeend", variantStockRow()); bindRemove(); };
+    vf.onsubmit = (e) => { e.preventDefault(); act(e.submitter, async () => {
+      const variants = $$(".variant-stock-row", vf).map((row) => ({label: $("[name=variant-label]", row).value, stock: +$("[name=variant-stock]", row).value}));
+      await api(`/api/products/${p.id}/variants`, {method: "PUT", json: {variants}});
+      toast("Остатки вариантов сохранены"); reload();
+    }); };
+  }
   $$("[data-v]", dr).forEach((a) => (a.onclick = async (e) => { e.preventDefault();
     const v = await api(`/api/products/${p.id}/versions/${a.dataset.v}`);
     $("#diff", dr).innerHTML = `<hr><b>Изменения в v${v.version}</b>` + (v.diff.length ? v.diff.map((x) => `<div><small>${esc(x.label)}</small><br><span class="diff-old">${esc(x.old ?? "")}</span><br><span class="diff-new">${esc(x.new ?? "")}</span></div>`).join("") : `<div class="muted">Только фото</div>`); }));
@@ -580,7 +634,10 @@ async function openClaim(id) {
   const packEv = c.evidence.filter((e) => ["packing_video", "packing_photo"].includes(e.kind));
   const intake = c.drafts.find((x) => x.task === "claim_intake");
   const responses = c.drafts.filter((x) => x.task === "claim_response");
-  const decisionOpts = [...ev.options, ...(ev.refusal_allowed ? ["refusal"] : [])];
+  const decisionOpts = [...ev.options, ...(ev.refusal_allowed ? ["refusal"] : [])].filter((v) => c.refund_limit > 0 || !["refund", "price_reduction"].includes(v));
+  const selectedItem = o.items.find((i) => i.id === c.order_item_id);
+  const needsReturnVariant = selectedItem && c.return_variants.length && !selectedItem.variant_id && !c.return_variants.some((v) => v.label.toLocaleLowerCase() === (selectedItem.variant || "").toLocaleLowerCase());
+  const itemLabel = (it) => `${it.title_ru || it.sku}${it.variant ? " / " + it.variant : ""}`;
   const dr = openDrawer(`
     <div class="row between"><h1>Претензия ${esc(c.number)}</h1>${timerChip(c.timer, c.status)}</div>
     <p class="muted">Заказ <a href="#" id="to-order">${esc(o.number)}</a> · ${esc(o.channel_label)} · ${o.items.map((i) => esc(i.title_ru) + " (паспорт v" + i.passport_version + ")").join(", ")} · ${money(o.total)}
@@ -604,14 +661,17 @@ async function openClaim(id) {
 
     <div class="card"><h2>1. Подтвердите тип и состояние (человек)</h2>
       ${c.status === "open" ? `<form id="cf" class="grid g3">
-        <div class="field"><label>Тип претензии</label><select name="type">${Object.entries(META.claim_types).map(([k, v]) => `<option value="${k}" ${(c.type || c.ai_type) === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
-        <div class="field"><label>Состояние возвращаемого товара</label><select name="cond">
+        <div class="field"><label for="claim-item">Позиция заказа</label><select id="claim-item" name="order_item_id" required><option value="">Выберите товар</option>${o.items.map((it) => `<option value="${it.id}" ${it.id === c.order_item_id ? "selected" : ""}>${esc(itemLabel(it))} — куплено ${it.qty} шт.</option>`).join("")}</select></div>
+        <div class="field"><label for="claim-qty">Количество в претензии</label><input id="claim-qty" name="item_qty" type="number" inputmode="numeric" min="1" max="${selectedItem?.qty || 1}" step="1" value="${c.item_qty || 1}" required></div>
+        <p class="hint">Одна претензия относится к одной позиции. Для другого товара зарегистрируйте отдельную претензию.</p>
+        <div class="field"><label for="claim-type">Тип претензии</label><select id="claim-type" name="type">${Object.entries(META.claim_types).map(([k, v]) => `<option value="${k}" ${(c.type || c.ai_type) === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+        <div class="field"><label for="claim-condition">Состояние возвращаемого товара</label><select id="claim-condition" name="cond">
           <option value="" ${c.condition_ok == null ? "selected" : ""}>не проверено</option>
           <option value="1" ${c.condition_ok === 1 ? "selected" : ""}>товарный вид, ярлыки сохранены</option>
           <option value="0" ${c.condition_ok === 0 ? "selected" : ""}>следы использования / нет ярлыков</option></select></div>
-        <div class="field"><label>Причина (для разбора)</label><select name="reason">${Object.entries(META.reason_tags).map(([k, v]) => `<option value="${k}" ${c.reason_tag === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+        <div class="field"><label for="claim-reason">Причина (для разбора)</label><select id="claim-reason" name="reason">${Object.entries(META.reason_tags).map(([k, v]) => `<option value="${k}" ${c.reason_tag === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
         <div><button class="btn primary small">Подтвердить</button></div></form>`
-        : `<div>Тип: <b>${esc(c.type_label)}</b></div>`}
+        : `<div>Тип: <b>${esc(c.type_label)}</b>${selectedItem ? `<br>${esc(itemLabel(selectedItem))} × ${c.item_qty}` : ""}</div>`}
     </div>
 
     <div class="card"><h2>2. Что допускают правила</h2>
@@ -625,11 +685,15 @@ async function openClaim(id) {
 
     <div class="card"><h2>3. Решение (человек)</h2>
       ${c.status === "open" ? (ev.claim_type ? `<form id="df">
-        <div class="grid g2"><div class="field"><label>Решение</label><select name="decision">${decisionOpts.map((x) => `<option value="${x}">${esc(META.decisions[x])}</option>`).join("")}</select></div>
-        <div class="field"><label>Сумма возврата (для возврата денег / уменьшения цены)</label><input name="amount" type="number" value="${o.total}"></div></div>
+        <p><b>${esc(itemLabel(selectedItem))} × ${c.item_qty}</b> · стоимость выбранного количества ${money(c.item_total)}</p>
+        <div class="grid g2"><div class="field"><label for="claim-decision">Решение</label><select id="claim-decision" name="decision">${decisionOpts.map((x) => `<option value="${x}">${esc(META.decisions[x])}</option>`).join("")}</select></div>
+        <div class="field"><label for="claim-refund-amount">Сумма возврата, тг</label><input id="claim-refund-amount" name="amount" type="number" min="1" max="${c.refund_limit}" step="1" value="${c.refund_limit}" required><small class="hint">Можно вернуть до ${money(c.refund_limit)} с учётом предыдущих возвратов по позиции.</small></div></div>
         <div class="field"><label>Обоснование / что делаем (для отказа — мотивированно, со ссылкой на доказательства)</label><textarea name="text" id="dec-text" rows="3" required></textarea></div>
-        <div class="row"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" name="restock" style="width:auto"> вернуть товар на склад</label>${micButton("#dec-text")}
+        <div class="row"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" name="restock" style="width:auto"> Вернуть выбранные ${c.item_qty} шт. на склад</label>${micButton("#dec-text")}
         <button class="btn primary">Принять решение</button></div>
+        <div class="note warn" id="refund-confirmation" role="alert" hidden><p></p><button type="button" class="btn small" id="cancel-refund-confirmation">Вернуться к редактированию</button></div>
+        ${needsReturnVariant ? `<div class="field" style="margin-top:12px"><label for="return-variant">Размер / цвет возвращаемого товара</label><select id="return-variant" name="return_variant_id" disabled><option value="">Выберите вариант</option>${c.return_variants.map((v) => `<option value="${v.id}">${esc(v.label)}</option>`).join("")}</select><small class="hint">В старом заказе вариант не указан — проверьте возвращаемый товар.</small></div>` : ""}
+        ${selectedItem.returned_qty ? `<p class="hint">По этой позиции уже возвращено на склад ${selectedItem.returned_qty} из ${selectedItem.qty} шт.</p>` : ""}
         <small class="muted">Возврат денег регистрируется один раз: повтор команды не создаст второй возврат.</small></form>` : `<div class="muted">Сначала подтвердите тип.</div>`)
       : `<div class="note ok"><b>${esc(c.decision_label)}</b> — ${esc(c.decision_text)}<br><small>Основание: ${esc(c.rule_basis)} · правила v${c.rules_version} · ${esc(c.decided_by)} · ${dt(c.decided_at)}</small>
          ${c.refund ? `<br>Возврат зарегистрирован: ${money(c.refund.amount)}` : ""}</div>
@@ -637,15 +701,50 @@ async function openClaim(id) {
          ${responses.map((x) => renderDraft(x, { sendable: true })).join("")}
          ${c.status === "decided" ? `<hr><button class="btn" id="close-claim">Закрыть претензию</button>` : ""}`}
     </div>`);
-  const reload = () => { openClaim(id); refreshClaimCount(); };
+  const reload = () => { go(location.hash.slice(1) || "claims"); refreshClaimCount(); return openClaim(id); };
   const post = (url, json) => api(url, { method: "POST", json });
   $("#to-order", dr).onclick = (e) => { e.preventDefault(); openOrder(o.id); };
   $("#ai-intake", dr).onclick = (e) => act(e.currentTarget, async () => { await post(`/api/claims/${id}/ai/intake`); reload(); });
+  if ($("#claim-item", dr)) $("#claim-item", dr).onchange = () => {
+    const it = o.items.find((it) => it.id === +$("#claim-item", dr).value), qty = $("#claim-qty", dr);
+    qty.max = it?.qty || 1; qty.value = Math.min(+qty.value || 1, it?.qty || 1);
+  };
   $("#cf", dr) && ($("#cf", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
-    act(e.submitter, async () => { await post(`/api/claims/${id}/confirm`, { type: f.get("type"), condition_ok: f.get("cond") === "" ? null : f.get("cond") === "1", reason_tag: f.get("reason") }); reload(); }); });
+    act(e.submitter, async () => { await post(`/api/claims/${id}/confirm`, { type: f.get("type"), condition_ok: f.get("cond") === "" ? null : f.get("cond") === "1", reason_tag: f.get("reason"), order_item_id: +f.get("order_item_id"), item_qty: +f.get("item_qty") }); reload(); }); });
+  const decisionForm = $("#df", dr);
+  let pendingRefund = null;
+  if (decisionForm) {
+    const resetConfirmation = () => {
+      pendingRefund = null;
+      $("#refund-confirmation", decisionForm).hidden = true;
+      $("button[type=submit], button:not([type])", decisionForm).textContent = "Принять решение";
+    };
+    $("#cancel-refund-confirmation", decisionForm).onclick = resetConfirmation;
+    decisionForm.addEventListener("input", resetConfirmation);
+    decisionForm.addEventListener("change", resetConfirmation);
+    const syncDecision = () => {
+      const decision = $("[name=decision]", decisionForm).value, restock = $("[name=restock]", decisionForm);
+      $("[name=amount]", decisionForm).disabled = !["refund", "price_reduction"].includes(decision);
+      restock.disabled = !["refund", "exchange", "replace"].includes(decision) || c.item_qty > selectedItem.qty - selectedItem.returned_qty;
+      if (restock.disabled) restock.checked = false;
+      const variant = $("[name=return_variant_id]", decisionForm);
+      if (variant) { variant.disabled = !restock.checked; variant.required = restock.checked; }
+    };
+    $("[name=decision]", decisionForm).onchange = syncDecision;
+    $("[name=restock]", decisionForm).onchange = syncDecision;
+    syncDecision();
+  }
   $("#df", dr) && ($("#df", dr).onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target);
-    if (f.get("decision") === "refund" && !confirm(`Зарегистрировать возврат ${money(+f.get("amount"))}?`)) return;
-    act(e.submitter, async () => { await post(`/api/claims/${id}/decide`, { decision: f.get("decision"), text: f.get("text"), refund_amount: +f.get("amount"), return_to_stock: !!f.get("restock") }); toast("Решение принято и записано в журнал"); reload(); }); });
+    const payload = { decision: f.get("decision"), text: f.get("text"), refund_amount: f.get("amount") === null ? null : +f.get("amount"), return_to_stock: !!f.get("restock"), return_variant_id: f.get("return_variant_id") ? +f.get("return_variant_id") : null };
+    if (payload.decision === "refund" && pendingRefund !== JSON.stringify(payload)) {
+      pendingRefund = JSON.stringify(payload);
+      const note = $("#refund-confirmation", dr); note.hidden = false;
+      $("p", note).textContent = `Проверьте: ${itemLabel(selectedItem)} × ${c.item_qty}, возврат ${money(payload.refund_amount)}.${payload.return_to_stock ? ` На склад вернётся ${c.item_qty} шт.` : " Остаток на складе не изменится."} Для регистрации нажмите «Подтвердить возврат».`;
+      e.submitter.textContent = "Подтвердить возврат";
+      note.scrollIntoView({block: "nearest", behavior: "smooth"});
+      return;
+    }
+    act(e.submitter, async () => { await post(`/api/claims/${id}/decide`, payload); toast("Решение принято и записано в журнал"); reload(); }); });
   $("#ai-resp", dr) && ($("#ai-resp", dr).onclick = (e) => act(e.currentTarget, async () => { await post(`/api/claims/${id}/ai/response`); reload(); }));
   $("#close-claim", dr) && ($("#close-claim", dr).onclick = (e) => act(e.currentTarget, async () => { await post(`/api/claims/${id}/close`); reload(); }));
   bindDrafts(dr, reload);

@@ -9,7 +9,7 @@ from datetime import timedelta
 import httpx
 
 from .. import config, db
-from ..core import orders
+from ..core import orders, passport
 
 HEADERS = {"Content-Type": "application/vnd.api+json", "Accept": "application/vnd.api+json"}
 
@@ -55,17 +55,23 @@ def fetch_new_orders(days: int = 3) -> list[dict]:
 
 def demo_orders(n: int = 2) -> list[dict]:
     with db.read() as c:
-        skus = [r["sku"] for r in c.execute("SELECT sku FROM products WHERE stock - reserved > 0")]
-    if not skus:
+        offers = []
+        for r in c.execute("SELECT id FROM products WHERE stock - reserved > 0"):
+            p = passport.get_product(c, r["id"])
+            labels = ([v["label"] for v in p["inventory_variants"] if v["free"] > 0]
+                      if p["inventory_variants"] else p["variant_options"] or [None])
+            offers.extend((p["sku"], label) for label in labels)
+    if not offers:
         return []
     out = []
     for _ in range(n):
         code = str(random.randint(100000000, 999999999))
+        sku, variant = random.choice(offers)
         out.append({
             "channel": "kaspi", "external_id": code,
             "buyer": {"name": random.choice(["Айгерім С.", "Ержан Т.", "Марина К.", "Дәулет Б."]),
                       "phone": "+7 701 000 00 00", "address": "Тараз (Kaspi Доставка)", "lang": random.choice(["ru", "kk"])},
-            "items": [{"sku": random.choice(skus), "qty": 1}],
+            "items": [{"sku": sku, "qty": 1, "variant": variant}],
             "paid_via": "kaspi_api",
             "created_at": (db.now() - timedelta(minutes=random.randint(1, 120))).isoformat(),
         })

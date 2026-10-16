@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from . import db
 from .ai.orchestrator import classify_claim_heuristic
-from .core import claims, evidence, orders, passport, rules
+from .core import claims, evidence, inventory, orders, passport, rules
 from .connectors import manual
 
 DEMO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270"><rect width="100%" height="100%" fill="#e8efe9"/>
@@ -101,6 +101,13 @@ def run() -> None:
         rules.active(c)
         for sku, cat, stock, data in PRODUCTS:
             pid = passport.create_product(c, sku, cat, stock, data, "demo")
+            demo_stocks = {
+                "DR-001": [("S", 2), ("M", 2), ("L", 2)],
+                "SN-002": [("39", 1), ("40", 1), ("41", 1), ("42", 2), ("43", 2), ("44", 1)],
+                "SK-004": [("36-40", 15), ("41-45", 15)],
+            }
+            if sku in demo_stocks:
+                inventory.set_variants(c, pid, [{"label": label, "stock": qty} for label, qty in demo_stocks[sku]])
             if sku == "DR-001":
                 st = _demo_file("Демо: фото платья")
                 evidence.add(c, "product_photo", st, "demo", product_id=pid)
@@ -117,7 +124,7 @@ def run() -> None:
                [{"sku": "SK-004", "qty": 1, "variant": "41-45"}], zone="Жамбылский район")
     o3 = order("olx", "Сергей П.", "+7 705 999 88 77", "Тараз, ул. Толе би 45", "ru", [{"sku": "EH-003", "qty": 1}])
     o4 = order("whatsapp", "Гүлназ Төлеуова", "+7 776 555 44 33", "Тараз, пр. Жамбыла 100", "kk",
-               [{"sku": "SN-002", "qty": 1}])
+               [{"sku": "SN-002", "qty": 1, "variant": "42"}])
     o5 = order("instagram", "Динара Қ.", "+7 702 777 66 55", "Тараз, ул. Сулейманова 3", "ru",
                [{"sku": "EH-003", "qty": 1}])
     # Попытка продать больше, чем есть: заказ не принимается (метрика «отмены из-за отсутствия товара»)
@@ -143,5 +150,5 @@ def run() -> None:
         orders.enqueue(c, "kaspi", "kaspi:demo-512345678", {
             "channel": "kaspi", "external_id": "512345678",
             "buyer": {"name": "Марат Ж.", "phone": "+7 700 123 45 67", "address": "Тараз (Kaspi Доставка)", "lang": "ru"},
-            "items": [{"sku": "SN-002", "qty": 1}], "paid_via": "kaspi_api"})
+            "items": [{"sku": "SN-002", "qty": 1, "variant": "43"}], "paid_via": "kaspi_api"})
     orders.process_inbox("connector:kaspi")

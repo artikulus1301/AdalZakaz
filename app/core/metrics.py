@@ -52,7 +52,9 @@ def compute(c: sqlite3.Connection) -> dict:
     reviewed = [d for d in drafts if d["status"] in ("approved", "sent", "rejected")]
     edited = [d for d in reviewed if d["status"] == "rejected" or (d["text_final"] or "") != (d["text_original"] or "")]
 
-    revenue = c.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE status NOT IN ('cancelled')").fetchone()[0]
+    orders_value = c.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE status != 'cancelled'").fetchone()[0]
+    payments_received = c.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE payment_status='paid'").fetchone()[0]
+    unpaid_orders_value = c.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE payment_status!='paid' AND status!='cancelled'").fetchone()[0]
     refunds = c.execute("SELECT COALESCE(SUM(amount),0) FROM refunds").fetchone()[0]
 
     def pct(a, b):
@@ -73,6 +75,9 @@ def compute(c: sqlite3.Connection) -> dict:
         "claim_resolution_avg_days": round(sum(durations) / len(durations), 1) if durations else None,
         "ai_drafts_reviewed": len(reviewed),
         "ai_drafts_edited_rate": pct(len(edited), len(reviewed)),
-        "revenue": revenue,
+        "orders_value": orders_value,
+        "payments_received": payments_received,
+        "unpaid_orders_value": unpaid_orders_value,
+        "revenue": payments_received - refunds,
         "refunds": refunds,
     }

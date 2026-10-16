@@ -441,6 +441,11 @@ th:first-child { border-top-left-radius: 10px; } th:last-child { border-top-righ
   .drawer .item > .field:first-child { grid-column: 1 / -1; }
 }
 
+.variant-stock-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(80px, 1fr); gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); margin-bottom: 12px; align-items: end; }
+.variant-stock-row label { min-width: 0; }
+.variant-stock-row .btn { justify-self: end; }
+.drawer input[type=file] { max-width: 100%; min-width: 0; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }

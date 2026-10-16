@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS passport_versions (
     UNIQUE (product_id, version)
 );
 
+CREATE TABLE IF NOT EXISTS product_variants (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    label TEXT NOT NULL,
+    stock INTEGER NOT NULL CHECK (stock >= 0),
+    reserved INTEGER NOT NULL DEFAULT 0 CHECK (reserved >= 0 AND reserved <= stock),
+    UNIQUE(product_id, label)
+);
+
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY,
     idem_key TEXT NOT NULL UNIQUE,
@@ -78,7 +87,8 @@ CREATE TABLE IF NOT EXISTS order_items (
     passport_version INTEGER NOT NULL,
     qty INTEGER NOT NULL CHECK (qty > 0),
     price INTEGER NOT NULL,
-    variant TEXT
+    variant TEXT,
+    variant_id INTEGER REFERENCES product_variants(id)
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -140,7 +150,16 @@ CREATE TABLE IF NOT EXISTS claims (
     rules_version INTEGER,
     decided_by TEXT,
     decided_at TEXT,
-    source TEXT NOT NULL DEFAULT 'buyer_page'
+    source TEXT NOT NULL DEFAULT 'buyer_page',
+    order_item_id INTEGER REFERENCES order_items(id),
+    item_qty INTEGER CHECK (item_qty > 0)
+);
+
+CREATE TABLE IF NOT EXISTS stock_returns (
+    claim_id INTEGER NOT NULL REFERENCES claims(id),
+    order_item_id INTEGER NOT NULL REFERENCES order_items(id),
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    PRIMARY KEY(claim_id, order_item_id)
 );
 
 CREATE TABLE IF NOT EXISTS refunds (
@@ -227,6 +246,28 @@ def init() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        # Additive migration: keep existing orders and their original stock facts.
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            for table, column, definition in (
+                ("order_items", "variant_id", "INTEGER REFERENCES product_variants(id)"),
+                ("claims", "order_item_id", "INTEGER REFERENCES order_items(id)"),
+                ("claims", "item_qty", "INTEGER CHECK (item_qty > 0)"),
+            ):
+                if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            conn.execute(
+                "UPDATE claims SET order_item_id = (SELECT MIN(id) FROM order_items WHERE order_id=claims.order_id), "
+                "item_qty = (SELECT qty FROM order_items WHERE order_id=claims.order_id) "
+                "WHERE (SELECT COUNT(*) FROM order_items WHERE order_id=claims.order_id)=1")
+            # The previous implementation restocked every line: record what it actually did.
+            conn.execute(
+                "INSERT OR IGNORE INTO stock_returns(claim_id, order_item_id, qty) "
+                "SELECT e.claim_id, oi.id, oi.qty FROM events e "
+                "JOIN claims cl ON cl.id=e.claim_id JOIN order_items oi ON oi.order_id=cl.order_id "
+                "WHERE e.type='returned_to_stock'")
+            conn.execute("PRAGMA user_version = 1")
+        conn.commit()
     finally:
         conn.close()
 

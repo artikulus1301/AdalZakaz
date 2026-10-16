@@ -3,7 +3,7 @@
 import sqlite3
 
 from .. import db
-from . import CoreError, NotFound
+from . import CoreError, NotFound, inventory
 
 # Поля паспорта: ключ -> (подпись ru, подпись kk)
 FIELDS: dict[str, tuple[str, str]] = {
@@ -118,6 +118,9 @@ def save_version(c: sqlite3.Connection, product_id: int, data: dict, note: str, 
     if not p:
         raise NotFound("Товар")
     clean = normalize(data)
+    tracked = inventory.variants(c, product_id)
+    if tracked and set(inventory.declared_variants(clean)) != {v["label"] for v in tracked}:
+        raise CoreError("Измените варианты в разделе «Остатки по размерам и цветам»")
     check = program_check(clean, p["category"])
     version = p["current_version"] + 1
     c.execute(
@@ -154,6 +157,9 @@ def get_product(c: sqlite3.Connection, product_id: int) -> dict:
     p["free"] = p["stock"] - p["reserved"]
     p["category_label"] = CATEGORIES.get(p["category"], {}).get("ru", p["category"])
     p["required"] = required_fields(p["category"])
+    p["inventory_variants"] = inventory.variants(c, product_id)
+    p["variant_options"] = ([v["label"] for v in p["inventory_variants"]]
+                            if p["inventory_variants"] else inventory.declared_variants(p["passport"]["data"]))
     return p
 
 

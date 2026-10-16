@@ -80,16 +80,16 @@ def create(c: sqlite3.Connection, payload: dict, actor: str) -> int:
         p = c.execute("SELECT * FROM products WHERE sku = ?", (it.get("sku"),)).fetchone()
         if not p:
             raise CoreError(f"Товар {it.get('sku')} не найден в паспортах")
-        qty = int(it.get("qty") or 1)
-        if qty <= 0:
-            raise CoreError("Количество должно быть больше нуля")
-        inventory.reserve(c, p["id"], qty)
+        qty = it.get("qty", 1)
+        if type(qty) is not int or qty <= 0:
+            raise CoreError("Количество должно быть положительным целым числом")
         pv = passport.get_version(c, p["id"])
+        variant, variant_id = inventory.resolve_variant(c, p["id"], it.get("variant"), pv["data"])
+        inventory.reserve(c, p["id"], qty, variant_id)
         price = int(it.get("price") or pv["data"].get("price") or 0)
-        variant = (it.get("variant") or "").strip() or None
         c.execute(
-            "INSERT INTO order_items(order_id, product_id, passport_version, qty, price, variant) VALUES (?,?,?,?,?,?)",
-            (oid, p["id"], pv["version"], qty, price, variant),
+            "INSERT INTO order_items(order_id, product_id, passport_version, qty, price, variant, variant_id) VALUES (?,?,?,?,?,?,?)",
+            (oid, p["id"], pv["version"], qty, price, variant, variant_id),
         )
         total += price * qty
     c.execute("UPDATE orders SET total = ? WHERE id = ?", (total, oid))
@@ -118,6 +118,7 @@ def get(c: sqlite3.Connection, order_id: int) -> dict:
         it["title_kk"] = pv["data"].get("title_kk")
         cur = c.execute("SELECT current_version FROM products WHERE id = ?", (it["product_id"],)).fetchone()[0]
         it["passport_outdated"] = cur != it["passport_version"]
+        it["returned_qty"] = c.execute("SELECT COALESCE(SUM(qty),0) FROM stock_returns WHERE order_item_id=?", (it["id"],)).fetchone()[0]
     o["channel_label"] = CHANNELS.get(o["channel"], o["channel"])
     o["status_label"] = STATUSES.get(o["status"], o["status"])
     o["next_statuses"] = sorted(TRANSITIONS.get(o["status"], set()))
@@ -175,7 +176,7 @@ def set_status(c: sqlite3.Connection, order_id: int, status: str, actor: str, re
         raise NotFound("Заказ")
     if status not in TRANSITIONS.get(o["status"], set()):
         raise CoreError(f"Переход «{STATUSES[o['status']]}» → «{STATUSES.get(status, status)}» не разрешён", status=409)
-    items = c.execute("SELECT product_id, qty FROM order_items WHERE order_id = ?", (order_id,)).fetchall()
+    items = c.execute("SELECT product_id, qty, variant_id FROM order_items WHERE order_id = ?", (order_id,)).fetchall()
 
     if status == "assembled" and not _has_packing_evidence(c, order_id):
         raise CoreError("Перед статусом «Собран» загрузите видео или фото упаковки — это доказательство в споре.",
@@ -184,10 +185,10 @@ def set_status(c: sqlite3.Connection, order_id: int, status: str, actor: str, re
         if o["channel"] != "kaspi" and not o["address_confirmed"]:
             raise CoreError("Подтвердите адрес и окно доставки с покупателем до отправки.", code="need_address")
         for it in items:
-            inventory.ship(c, it["product_id"], it["qty"])
+            inventory.ship(c, it["product_id"], it["qty"], it["variant_id"])
     if status == "cancelled":
         for it in items:
-            inventory.release(c, it["product_id"], it["qty"])
+            inventory.release(c, it["product_id"], it["qty"], it["variant_id"])
         c.execute("UPDATE orders SET cancel_reason = ? WHERE id = ?", (reason or "other", order_id))
     if status == "delivered":
         c.execute("UPDATE orders SET delivered_at = ? WHERE id = ?", (db.now_iso(), order_id))

@@ -416,23 +416,29 @@ def claim_response(c: sqlite3.Connection, claim_id: int) -> dict:
     lang = reply_lang(cl["lang"], o["buyer_lang"])
     facts["refusal_allowed"] = cl["decision"] == "refusal"
     dec_ru = rules.DECISIONS[cl["decision"]]
+    selected = ({"sku": cl["item"]["sku"], "variant": cl["item"]["variant"], "qty": cl["item_qty"], "value_tg": cl["item_total"]}
+                if cl["item"] else None)
     if cl["refund"]:
         facts["prices"].append(cl["refund"]["amount"])
     if lang == "kk":
         text = (f"Құрметті сатып алушы! {cl['number']} шағымыңыз ({o['number']} тапсырыс) қаралды. "
+                + (f"Тауар: {selected['sku']}, саны: {selected['qty']}. " if selected else "") +
                 f"Шешім: {dec_ru}. Негіздеме: {cl['decision_text'].rstrip('.')}. "
                 f"Шешіммен келіспесеңіз, жүгінуге болады: {r['escalation_kk']}.")
     else:
         text = (f"Уважаемый покупатель! Ваша претензия {cl['number']} по заказу {o['number']} рассмотрена. "
+                + (f"Позиция: {selected['sku']}, количество: {selected['qty']}. " if selected else "") +
                 f"Решение: {dec_ru}. Основание: {cl['decision_text'].rstrip('.')}. "
                 f"Если вы не согласны с решением, вы можете обратиться: {r['escalation_ru']}.")
     heuristic = {"lang": lang, "reply": text}
     payload = {
         "facts": {**ctx, "decision": dec_ru, "decision_text_by_seller": cl["decision_text"], "rule_basis": cl["rule_basis"],
+                  "claim_item": selected,
                   "refund_amount_tg": cl["refund"]["amount"] if cl["refund"] else None,
                   "escalation": r["escalation_kk"] if lang == "kk" else r["escalation_ru"]},
         "reply_lang": lang,
-        "instructions": "Оформи письменный ответ на претензию строго по решению продавца и основанию. Не меняй решение, "
+        "instructions": "Оформи письменный ответ на претензию строго по решению продавца и основанию. Решение касается только claim_item, "
+                        "а не всего заказа. Не меняй решение, "
                         "не добавляй новых обещаний. В конце укажи, куда обратиться при несогласии (escalation).",
         "output_schema": {"lang": "kk|ru", "reply": "str"},
     }
@@ -445,7 +451,7 @@ def claim_response(c: sqlite3.Connection, claim_id: int) -> dict:
 def reasons_analysis(c: sqlite3.Connection) -> dict:
     rows = db.rows(c.execute(
         "SELECT cl.id, cl.number, cl.text, cl.voice_transcript, COALESCE(cl.type, cl.ai_type) AS type, cl.reason_tag, "
-        "cl.decision, oi.product_id FROM claims cl JOIN order_items oi ON oi.order_id = cl.order_id "
+        "cl.decision, oi.product_id FROM claims cl JOIN order_items oi ON oi.id = cl.order_item_id "
         "WHERE cl.status IN ('decided', 'closed') ORDER BY cl.id"))
     groups: dict[tuple, dict] = {}
     for r in rows:

@@ -12,7 +12,7 @@ import segno
 from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 from . import config, db, seed
 from .ai import orchestrator as ai
@@ -205,7 +205,7 @@ def apply_field(pid: int, body: ApplyIn, who: str = Depends(seller)):
 
 
 class StockIn(BaseModel):
-    stock: int
+    stock: StrictInt = Field(ge=0)
 
 
 @app.post("/api/products/{pid}/stock")
@@ -213,6 +213,27 @@ def set_stock(pid: int, body: StockIn, who: str = Depends(seller)):
     with db.tx() as c:
         inventory.set_stock(c, pid, body.stock)
         events.log(c, "stock_set", who, payload={"product_id": pid, "stock": body.stock})
+        return passport.get_product(c, pid)
+
+
+class VariantStockIn(BaseModel):
+    label: str
+    stock: StrictInt = Field(ge=0)
+
+
+class VariantsIn(BaseModel):
+    variants: list[VariantStockIn] = Field(min_length=1, max_length=200)
+
+
+@app.put("/api/products/{pid}/variants")
+def set_variants(pid: int, body: VariantsIn, who: str = Depends(seller)):
+    with db.tx() as c:
+        data = passport.get_version(c, pid)["data"]
+        inventory.set_variants(c, pid, [v.model_dump() for v in body.variants])
+        labels = ", ".join(v["label"] for v in inventory.variants(c, pid))
+        if data.get("variants") != labels:
+            passport.save_version(c, pid, {**data, "variants": labels}, "Настроены варианты и остатки", who)
+        events.log(c, "variant_stock_set", who, payload={"product_id": pid, "variants": body.model_dump()["variants"]})
         return passport.get_product(c, pid)
 
 
@@ -443,26 +464,29 @@ class ConfirmIn(BaseModel):
     type: str
     condition_ok: bool | None = None
     reason_tag: str | None = None
+    order_item_id: StrictInt | None = None
+    item_qty: StrictInt | None = Field(default=None, gt=0)
 
 
 @app.post("/api/claims/{cid}/confirm")
 def claim_confirm(cid: int, body: ConfirmIn, who: str = Depends(seller)):
     with db.tx() as c:
-        claims.confirm(c, cid, body.type, body.condition_ok, body.reason_tag, who)
+        claims.confirm(c, cid, body.type, body.condition_ok, body.reason_tag, who, body.order_item_id, body.item_qty)
         return claims.evaluation(c, cid)
 
 
 class DecideIn(BaseModel):
     decision: str
     text: str
-    refund_amount: int | None = None
+    refund_amount: StrictInt | None = Field(default=None, gt=0)
     return_to_stock: bool = False
+    return_variant_id: StrictInt | None = None
 
 
 @app.post("/api/claims/{cid}/decide")
 def claim_decide(cid: int, body: DecideIn, who: str = Depends(seller)):
     with db.tx() as c:
-        return claims.decide(c, cid, body.decision, body.text, who, body.refund_amount, body.return_to_stock)
+        return claims.decide(c, cid, body.decision, body.text, who, body.refund_amount, body.return_to_stock, body.return_variant_id)
 
 
 @app.post("/api/claims/{cid}/ai/response")
