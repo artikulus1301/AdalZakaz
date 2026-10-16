@@ -4,13 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Тауар паспорты / Паспорт товара — AdalZakaz</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div class="public">
-  <header><div><div class="logo" style="margin:0">AdalZakaz</div><small class="muted" id="seller"></small></div><div class="langs" id="langs"></div></header>
-  <div id="root"><div class="empty"><span class="spin"></span></div></div>
+  <header><div><div class="logo">AdalZakaz</div><small class="muted" id="seller"></small></div><div class="langs" id="langs"></div></header>
+  <main id="root"><div class="skel" aria-busy="true"><i class="h"></i><i class="box"></i><i></i><i></i></div></main>
 </div>
+<script src="/static/icons.js"></script>
 <script src="/static/buyer.js"></script>
 <script>
 const pid = location.pathname.split("/").pop();
@@ -21,18 +23,18 @@ function render() {
   $("#root").innerHTML = `
     <div class="card">
       <small class="muted">${L.passport} · ${esc(LANG === "kk" ? P.category_kk : P.category)} · v${P.version} · ${L.updated} ${new Date(P.updated_at).toLocaleDateString("ru-RU")}</small>
-      <h1>${esc(p["title_" + LANG] || p.title_ru)}</h1>
-      <div class="row"><b style="font-size:1.3rem">${money(p.price)}</b><span class="chip ${P.in_stock ? "ok" : "bad"}">${P.in_stock ? L.inStock : L.outStock}</span></div>
-      <div class="thumbs" style="margin:10px 0">${(p.photos || []).map((u) => `<a href="${u}" target="_blank"><img src="${u}" alt="" style="width:200px;height:150px"></a>`).join("")}</div>
+      <h1 style="margin-top:6px">${esc(p["title_" + LANG] || p.title_ru)}</h1>
+      <div class="row"><span class="price">${money(p.price)}</span><span class="chip ${P.in_stock ? "ok" : "bad"}">${P.in_stock ? L.inStock : L.outStock}</span></div>
+      <div class="thumbs" style="margin:12px 0">${(p.photos || []).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="${esc(L.photo)} ${i + 1}: ${esc(p["title_" + LANG] || p.title_ru)}" loading="lazy" style="width:200px;height:150px"></a>`).join("")}</div>
       <p>${esc(p["desc_" + LANG] || "")}</p>
       ${factsTable(p)}
     </div>
     <div class="card">${returnsBlock(P.rules, P.excluded)}</div>
-    <p class="note ai">🤖 ${esc(P.ai_notice[LANG])}</p>`;
+    <p class="note ai">${esc(P.ai_notice[LANG])}</p>`;
 }
-fetch(`/api/public/passport/${encodeURIComponent(pid)}`).then((r) => (r.ok ? r.json() : null)).then((data) => {
+fetch(`/api/public/passport/${encodeURIComponent(pid)}`).then((r) => (r.ok ? r.json() : null)).catch(() => null).then((data) => {
   initLang("ru", () => P && render());
-  if (!data) { $("#root").innerHTML = `<div class="note bad">Not found</div>`; return; }
+  if (!data) { $("#root").innerHTML = `<div class="note bad">Тауар табылмады / Товар не найден</div>`; return; }
   P = data; render();
 });
 </script>

@@ -2,32 +2,41 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
   <title>AdalZakaz — панель продавца</title>
+  <script>try { const t = localStorage.getItem("adal_theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<a class="skip" href="#view">Перейти к содержимому</a>
 <div class="app">
   <aside class="side">
-    <div class="logo">AdalZakaz</div>
+    <div class="brand-row">
+      <a class="logo" href="#dash">AdalZakaz</a>
+      <button class="icon-btn" id="theme" type="button" aria-label="Переключить тему" title="Тема: системная / светлая / тёмная"></button>
+    </div>
     <div class="logo-sub" id="seller-name">Паспорт товара · журнал заказа · претензии</div>
-    <nav class="nav" id="nav">
-      <button data-view="dash">Сводка</button>
-      <button data-view="orders">Заказы</button>
-      <button data-view="products">Товары и паспорта</button>
-      <button data-view="claims">Претензии <span class="count" id="claims-count" hidden></span></button>
-      <button data-view="analytics">Аналитика</button>
-      <button data-view="rules">Правила и ИИ</button>
+    <nav class="nav" id="nav" aria-label="Разделы">
+      <button data-view="dash"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Сводка</button>
+      <button data-view="orders"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18M16 10a4 4 0 0 1-8 0"/></svg>Заказы</button>
+      <button data-view="products"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 16V8l-9-5-9 5v8l9 5z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg><span class="lbl-long">Товары и паспорта</span><span class="lbl-short">Товары</span></button>
+      <button data-view="claims"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/></svg>Претензии <span class="count" id="claims-count" hidden></span></button>
+      <button data-view="analytics"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 3v18h18M7 15l4-4 3 3 5-6"/></svg>Аналитика</button>
+      <button data-view="rules"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="lbl-long">Правила и ИИ</span><span class="lbl-short">Правила</span></button>
     </nav>
     <div class="side-foot">
       <div id="ai-status"></div>
       <a href="/logout">Выйти</a>
     </div>
   </aside>
-  <main id="view"></main>
+  <main id="view" tabindex="-1"></main>
 </div>
 <div id="drawer-root"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <script src="/static/recorder.js"></script>
+<script src="/static/icons.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

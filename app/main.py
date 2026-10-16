@@ -38,6 +38,15 @@ app = FastAPI(title="AdalZakaz", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def revalidate_static(request: Request, call_next):
+    # Браузер перепроверяет CSS/JS/HTML при каждой загрузке (по ETag) — без устаревшего кеша после обновлений
+    resp = await call_next(request)
+    if not request.url.path.startswith(("/api/", "/files/")):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.exception_handler(CoreError)
 async def core_error(_req: Request, e: CoreError):
     return JSONResponse({"error": e.message, "code": e.code}, status_code=e.status)

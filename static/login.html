@@ -3,22 +3,58 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>AdalZakaz — вход</title>
+  <script>try { const t = localStorage.getItem("adal_theme"); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="public" style="max-width:380px;padding-top:12vh">
-  <div class="card">
-    <div class="logo" style="margin:0 0 4px">AdalZakaz</div>
-    <p class="muted" style="margin-top:0">Вход в панель продавца</p>
-    <form method="post" action="/login">
-      <div class="field"><label for="p">Пароль</label><input id="p" name="password" type="password" autofocus required></div>
-      <p class="note bad" id="err" hidden>Неверный пароль</p>
-      <button class="btn primary" type="submit">Войти</button>
-    </form>
-    <p class="muted" style="font-size:.8rem">Пароль задаётся в .env (ADAL_SELLER_PASSWORD). По умолчанию для демо: <code>demo</code>.</p>
-  </div>
+<div class="auth">
+  <section class="auth-hero" aria-label="О сервисе">
+    <div class="logo">AdalZakaz</div>
+    <div>
+      <h2>Честная торговля без споров и потерянных заказов</h2>
+      <p>Паспорт товара, журнал заказа и претензии — в одном окне для Kaspi, OLX, Instagram и WhatsApp.</p>
+      <ul class="feat">
+        <li><span data-i="package"></span>Один остаток на все каналы — товар не продаётся дважды</li>
+        <li><span data-i="clock"></span>Счётчик 10 дней по каждой претензии</li>
+        <li><span data-i="ai"></span>ИИ пишет черновики на kk/ru — решаете вы</li>
+      </ul>
+    </div>
+    <small>Тараз · Жамбылская область</small>
+  </section>
+
+  <main class="auth-form">
+    <div class="auth-card">
+      <h1>С возвращением</h1>
+      <p class="muted">Войдите в панель продавца</p>
+      <form method="post" action="/login" id="lf" style="margin-top:24px">
+        <div class="note bad" id="err" role="alert" hidden><b>Неверный пароль.</b> Проверьте раскладку и Caps Lock и попробуйте ещё раз.</div>
+        <div class="field">
+          <label for="p">Пароль</label>
+          <div style="position:relative">
+            <input id="p" name="password" type="password" autocomplete="current-password" autofocus required style="padding-right:52px;min-height:50px" aria-describedby="caps">
+            <button type="button" class="icon-btn" id="eye" aria-label="Показать пароль" aria-pressed="false" style="position:absolute;right:3px;top:3px"></button>
+          </div>
+          <span class="hint" id="caps" hidden>Включён Caps Lock</span>
+        </div>
+        <button class="btn primary block" type="submit" id="go">Войти <span data-i="arrowRight"></span></button>
+      </form>
+      <p class="hint" style="margin-top:20px">Пароль задаётся в .env (ADAL_SELLER_PASSWORD). Для демо: <code>demo</code>.</p>
+    </div>
+  </main>
 </div>
-<script>if (location.search.includes("error")) document.getElementById("err").hidden = false;</script>
+<script src="/static/icons.js"></script>
+<script>
+document.querySelectorAll("[data-i]").forEach((el) => (el.outerHTML = icon(el.dataset.i, el.closest(".feat") ? 20 : 18)));
+const p = document.getElementById("p"), eye = document.getElementById("eye");
+eye.innerHTML = icon("eye", 20);
+if (location.search.includes("error")) { document.getElementById("err").hidden = false; p.setAttribute("aria-invalid", "true"); }
+eye.onclick = () => { const show = p.type === "password"; p.type = show ? "text" : "password"; eye.setAttribute("aria-pressed", show); eye.innerHTML = icon(show ? "eyeOff" : "eye", 20); eye.setAttribute("aria-label", show ? "Скрыть пароль" : "Показать пароль"); p.focus(); };
+p.addEventListener("keyup", (e) => { document.getElementById("caps").hidden = !e.getModifierState?.("CapsLock"); });
+document.getElementById("lf").onsubmit = () => { const b = document.getElementById("go"); b.disabled = true; b.innerHTML = '<span class="spin"></span> Входим…'; };
+</script>
 </body>
 </html>
